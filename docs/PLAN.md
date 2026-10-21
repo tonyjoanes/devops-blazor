@@ -7,7 +7,8 @@ A personal, **read-only** Blazor app that sits alongside Azure DevOps (ADO). It 
 ## 1. Goals and non-goals
 
 **Goals**
-- Fast, read-only views over repos, pipelines, runs, logs, policies and agent pools.
+- Fast, read-only views over repos, pipelines, runs, policies and agent pools.
+- One-click routes to the exact log in the ADO portal, rather than viewing logs in the app.
 - **Agent pool insight:** how long jobs wait for an agent, how long they run, and how busy each pool and agent is.
 - Views that span projects (and possibly organisations), which the portal does poorly.
 - An architecture where adding a feature means one API client method, one page and maybe one component.
@@ -25,7 +26,7 @@ A personal, **read-only** Blazor app that sits alongside Azure DevOps (ADO). It 
 |---|---|---|
 | Framework | **.NET 10 (LTS), Blazor Web App** with **Interactive Server** render mode | Tokens and PATs stay on the server and are never shipped to the browser. Server-side HttpClient calls avoid CORS. Live updates come over SignalR for free. |
 | UI kit | **Microsoft Fluent UI Blazor** (`Microsoft.FluentUI.AspNetCore.Components`) | Looks native next to ADO. Includes a good `FluentDataGrid` with virtualisation, badges, a tree view and dialogs. (MudBlazor is a fine alternative.) |
-| ADO access | **Typed `HttpClient` against the ADO REST API (v7.1)**, behind our own interfaces | Lightweight and easy to mock. It gives full control over paging and continuation tokens, `$top`, and log streaming. The official `Microsoft.TeamFoundationServer.Client` SDK works but is heavy and lags the API. |
+| ADO access | **Typed `HttpClient` against the ADO REST API (v7.1)**, behind our own interfaces | Lightweight and easy to mock. It gives full control over paging and continuation tokens and `$top`. The official `Microsoft.TeamFoundationServer.Client` SDK works but is heavy and lags the API. |
 | Resilience | `Microsoft.Extensions.Http.Resilience` (Polly) | Retries and backoff, and honours `Retry-After` on ADO 429/503 throttling. |
 | Caching | `HybridCache` (in-memory to start) | Repo and pipeline lists change rarely. Cache them for minutes; keep runs and agent status short-lived. |
 | Local store | **SQLite via EF Core** | Keeps a history of agent job data beyond what ADO retains, so wait and run time trends can cover weeks or months. |
@@ -53,7 +54,7 @@ devops-blazor/
 │  ├─ DevOpsBlazor.Web/                 # Blazor Web App (UI only)
 │  │  ├─ Components/
 │  │  │  ├─ Layout/                     # MainLayout, NavMenu, org/project picker
-│  │  │  └─ Shared/                     # StatusBadge, RelativeTime, Duration, LogViewer, Loading/Error states
+│  │  │  └─ Shared/                     # StatusBadge, RelativeTime, Duration, OpenInAdo link, Loading/Error states
 │  │  ├─ Features/                      # one folder per feature (vertical slices)
 │  │  │  ├─ Repositories/               # RepoList.razor, RepoDetail.razor
 │  │  │  ├─ Pipelines/                  # PipelineList.razor, PipelineRuns.razor, RunDetail.razor
@@ -64,6 +65,7 @@ devops-blazor/
 │  ├─ DevOpsBlazor.AzureDevOps/         # ADO client library (no UI dependencies)
 │  │  ├─ Auth/                          # IAdoTokenProvider, PatTokenProvider, EntraTokenProvider
 │  │  ├─ Http/                          # AdoHttpHandler (auth, api-version, read-only guard, paging helper)
+│  │  ├─ Links/                         # AdoLinks: builds portal URLs (run, job/task log, logs zip, repo, pool)
 │  │  ├─ Clients/                       # IGitClient, IBuildClient, IPolicyClient, IAgentPoolClient, ...
 │  │  ├─ Models/                        # DTO records mapped from REST JSON
 │  │  └─ ServiceCollectionExtensions.cs # AddAzureDevOps(config)
@@ -92,7 +94,7 @@ devops-blazor/
 - `AdoHttpHandler`: adds the auth header and `api-version=7.1`, enforces the read-only guard, logs the request, and maps failures (401 → "PAT expired or invalid", 403 → "missing scope X", 404 and 429) to typed exceptions the UI can show nicely.
 - `PagedAsync<T>()` helper: follows the `x-ms-continuationtoken` header and `continuationToken` query parameter, and returns `IAsyncEnumerable<T>`.
 - Org/project context: a scoped `AdoContext` service plus a picker in the top bar, kept in the URL (`/contoso/Platform/pipelines`) so links can be shared and bookmarked.
-- Shared components for `StatusBadge` (succeeded, failed, partiallySucceeded, canceled, inProgress), durations, relative time, empty, loading and error states, and deep links back to the ADO portal.
+- Shared components for `StatusBadge` (succeeded, failed, partiallySucceeded, canceled, inProgress), durations, relative time, empty, loading and error states, and deep links back to the ADO portal (via `AdoLinks`).
 
 ---
 
@@ -157,15 +159,21 @@ ADO keeps only limited job history and `jobrequests` returns recent jobs. To get
 
 The charts then read from SQLite and stay fast. Note that history starts when the collector first runs, so turn it on early.
 
-### Phase 3: Run detail and logs
-| Feature | REST endpoint(s) |
+### Phase 3: Run detail and fast routes to the logs
+The app **does not fetch or render log content**. Instead, it gets you to the right log in the ADO portal in one click, which avoids pushing large logs through the server. Everything on this page comes from small JSON calls.
+
+| Feature | Source |
 |---|---|
 | **Run timeline**: stages → jobs → tasks tree with result, duration, agent name and error/warning counts, with failed nodes auto-expanded | `GET .../build/builds/{buildId}/timeline` |
-| **View a log** for a task inline (monospace viewer, virtualised, ANSI/`##[error]` highlighting, jump-to-first-error) | `GET .../build/builds/{buildId}/logs/{logId}` (`logId` comes from the timeline record) |
-| **Download all logs** as a zip | `GET .../build/builds/{buildId}/logs?$format=zip`, streamed to the browser via JS interop |
-| Error summary: the issues from the timeline (`record.issues`) listed at the top of the run page | timeline |
-| Artifacts list and download | `GET .../build/builds/{buildId}/artifacts` |
+| **"Open log" on every task** | Deep link to the portal's log view focused on that job and task: `https://dev.azure.com/{org}/{project}/_build/results?buildId={buildId}&view=logs&j={jobRecordId}&t={taskRecordId}` (record ids come from the timeline). |
+| **"Open first failure"** button at the top of a failed run, and in the runs list | The same deep link, aimed at the first failed task in the timeline. |
+| **Error summary**: the error and warning messages from the timeline (`record.issues`) listed at the top of the run page, often enough to see what broke without opening the log at all | timeline |
+| **Download all logs (zip)** link | A plain browser link to `https://dev.azure.com/{org}/{project}/_apis/build/builds/{buildId}/logs?$format=zip`. The download comes straight from ADO using your browser's existing ADO sign-in, not through the app. |
+| Copy-link buttons for a run, job or task | built from the same URLs |
+| Artifacts list, with links into the portal | `GET .../build/builds/{buildId}/artifacts` |
 | Changes in this run (commits) | `GET .../build/builds/{buildId}/changes` |
+
+> The portal URL format is not a formal API, so all ADO links are built in one `AdoLinks` helper. If Microsoft changes the format, there's one place to fix.
 
 ### Phase 4: Repo policies
 | Feature | REST endpoint(s) |
@@ -184,7 +192,7 @@ The charts then read from SQLite and stay fast. Note that history starts when th
 ### Further ideas (backlog, roughly by value)
 1. **Flaky test detector**: use the Test Runs/Results APIs to find tests that flip between pass and fail on the same commit or branch.
 2. **Pipeline trends**: duration and pass rate over 30/90 days.
-3. **Log search**: grep across the failed-task logs of the last N runs ("when did this error first appear?").
+3. **Error search**: search the timeline error messages (`record.issues`) across the last N runs ("when did this error first appear?"). This uses timeline data, not log files.
 4. **Compare two runs**: diff of commits, parameters, variables, agent used and failed tasks between a good run and a bad one.
 5. **Capacity what-if**: replay the stored job history against a hypothetical pool size to estimate how much adding N agents would cut p90 wait.
 6. **Service connections and variable groups inventory**: who uses what, plus a search for which pipelines reference a given variable group (`serviceendpoint/endpoints`, `distributedtask/variablegroups`).
@@ -193,8 +201,7 @@ The charts then read from SQLite and stay fast. Note that history starts when th
 9. **Cross-repo code search** (`almsearch.dev.azure.com/.../_apis/search/codesearchresults`).
 10. **YAML viewer**: show the pipeline's YAML (fetched from the repo) with template references linked.
 11. **Notifications**: a background service watches the watchlist and pushes toast notifications when a watched pipeline fails or a pool's wait time spikes.
-12. **AI failure summary** (optional): send the failing task's log tail to an LLM for a "likely cause" explanation.
-13. **Multi-org support**: the config already allows it; the picker switches the org.
+12. **Multi-org support**: the config already allows it; the picker switches the org.
 
 ---
 
@@ -202,7 +209,7 @@ The charts then read from SQLite and stay fast. Note that history starts when th
 
 - **Throttling:** ADO rate-limits per user (TSTUs). Fan-out views (policy audit, red board, collector polling every pool) should limit concurrency (`Parallel.ForEachAsync` with `MaxDegreeOfParallelism ≈ 4–8`), cache results and honour `Retry-After`.
 - **Paging:** list endpoints cap results (often 100–1000) and return a continuation token. Always go through the paging helper.
-- **Large logs:** stream them (`ReadAsStreamAsync`) and render with `Virtualize`. Never load a 50 MB log into a single string in the circuit.
+- **Logs stay in ADO:** the app never downloads log content, so there's no large-payload streaming through the Blazor circuit. If an in-app log view is ever wanted, it would be a separate, opt-in feature.
 - **Timestamps:** ADO returns UTC. Store UTC and convert to local time only in the UI, which matters for the day × hour heatmap. Treat jobs with missing `assignTime` (cancelled while queued) separately rather than as zero wait.
 - **Microsoft-hosted pools:** wait time there reflects your *parallel job limit*, not machine count, so label those charts that way.
 - **Blazor Server circuits:** keep per-user state in scoped services, and dispose of `CancellationTokenSource`s when components are disposed so abandoned page loads stop calling ADO.
@@ -222,7 +229,7 @@ The charts then read from SQLite and stay fast. Note that history starts when th
 6. Agent pools overview and agent list (live status).
 7. Job history: the `jobrequests` client, wait/run stats in Core, and the pool detail page.
 8. SQLite store and `AgentJobCollector`, then trend charts and the heatmap.
-9. Run detail: timeline tree, log viewer and zip download.
+9. Run detail: timeline tree, error summary, `AdoLinks` with "open log" / "open first failure" / zip links.
 10. Repo policies page, then the policy audit matrix.
 11. Dashboard: my PRs, approvals, red board, pool tile.
 
