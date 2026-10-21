@@ -16,7 +16,7 @@ A personal, **read-only** Blazor app that sits alongside Azure DevOps (ADO). It 
 **Non-goals**
 - **Any write operation against ADO.** No queuing, retrying or cancelling runs, no approving, no editing. The only thing the app writes to is its own local database (see §4, Phase 2).
 - Replacing the ADO portal.
-- Multi-tenant SaaS hosting. The app is single user and runs locally or in a private App Service.
+- Hosting. The app is single user and **runs locally only** (`dotnet run`, browsing to `https://localhost`), so there's no app login and no cloud deployment.
 
 ---
 
@@ -29,13 +29,21 @@ A personal, **read-only** Blazor app that sits alongside Azure DevOps (ADO). It 
 | ADO access | **Typed `HttpClient` against the ADO REST API (v7.1)**, behind our own interfaces | Lightweight and easy to mock. It gives full control over paging and continuation tokens and `$top`. The official `Microsoft.TeamFoundationServer.Client` SDK works but is heavy and lags the API. |
 | Resilience | `Microsoft.Extensions.Http.Resilience` (Polly) | Retries and backoff, and honours `Retry-After` on ADO 429/503 throttling. |
 | Caching | `HybridCache` (in-memory to start) | Repo and pipeline lists change rarely. Cache them for minutes; keep runs and agent status short-lived. |
-| Local store | **SQLite via EF Core** | Keeps a history of agent job data beyond what ADO retains, so wait and run time trends can cover weeks or months. |
+| Local store | **SQLite via EF Core**, a single file under `%LOCALAPPDATA%/DevOpsBlazor/` | Keeps a history of agent job data beyond what ADO retains, so wait and run time trends can cover weeks or months. A single local file needs no database server, and backup is just copying the file. |
 | Charts | ApexCharts.Blazor | Run duration and pass-rate trends, wait-time percentiles, pool heatmaps. |
 | Tests | xUnit + bUnit + `RichardSzalay.MockHttp` | Unit-test API clients against recorded JSON, and test components in isolation. |
 
-### Authentication (staged)
-1. **Phase 1: Personal Access Token (PAT), read scopes only.** Store it in `dotnet user-secrets` locally (and Key Vault if deployed). Use scopes *Code (Read)*, *Build (Read)*, *Project and Team (Read)* and *Agent Pools (Read)*, plus *Test Management (Read)* if the flaky test feature is built. Send it as Basic auth (`:{PAT}` base64).
-2. **Phase 2: Microsoft Entra ID.** Use `DefaultAzureCredential` / MSAL for the ADO resource (`499b84ac-1321-427f-aa17-267ca6975798/.default`). This removes PAT expiry pain, and ADO is moving away from PATs anyway. Hide it behind an `IAdoTokenProvider` interface so the swap touches only that class.
+### Authentication: Personal Access Token (PAT)
+- Store the PAT in `dotnet user-secrets`, which keeps it in your user profile, outside the repo and out of `appsettings.json`. Send it as Basic auth (`:{PAT}` base64).
+- **Scopes (all read-only):**
+  - *Code (Read)*
+  - *Build (Read)*
+  - *Project and Team (Read)*
+  - *Agent Pools (Read)*
+  - *Release (Read)*, to name the classic release pipelines that run on your release agents
+  - *Test Management (Read)*, only if the flaky test feature is built
+- **PAT expiry:** a PAT can't read its own expiry date, so store it as `PatExpiresOn` next to the PAT in user-secrets. The top bar warns when it's within 7 days, and a 401 from ADO shows "PAT expired or revoked".
+- Token access sits behind an `IAdoTokenProvider` interface. If PATs are ever restricted, switching to Entra ID (`DefaultAzureCredential` with the ADO resource `499b84ac-1321-427f-aa17-267ca6975798/.default`, e.g. via your `az login`) changes only that class. Not planned for now.
 
 ### Read-only by design
 Read-only is enforced in three places, not just by convention:
@@ -63,7 +71,7 @@ devops-blazor/
 │  │  │  └─ Dashboard/
 │  │  └─ Program.cs
 │  ├─ DevOpsBlazor.AzureDevOps/         # ADO client library (no UI dependencies)
-│  │  ├─ Auth/                          # IAdoTokenProvider, PatTokenProvider, EntraTokenProvider
+│  │  ├─ Auth/                          # IAdoTokenProvider, PatTokenProvider
 │  │  ├─ Http/                          # AdoHttpHandler (auth, api-version, read-only guard, paging helper)
 │  │  ├─ Links/                         # AdoLinks: builds portal URLs (run, job/task log, logs zip, repo, pool)
 │  │  ├─ Clients/                       # IGitClient, IBuildClient, IPolicyClient, IAgentPoolClient, ...
@@ -86,7 +94,16 @@ devops-blazor/
   ],
   "AuthMode": "Pat",
   "CacheMinutes": { "Repos": 10, "Pipelines": 10, "Runs": 1, "Agents": 1 },
-  "AgentJobCollector": { "Enabled": true, "PollMinutes": 15, "RetentionDays": 180 }
+  "AgentJobCollector": { "Enabled": true, "PollMinutes": 15, "RetentionDays": 180 },
+  "AgentPools": {
+    "Roles": {                                   // pool name patterns → role, used to group the pool pages
+      "Build":   [ "*Build*" ],
+      "Test":    [ "*Test*" ],
+      "Release": [ "*Release*", "*Deploy*" ]
+    },
+    "MicrosoftHosted": { "ParallelJobs": 10 },   // from Organization settings → Parallel jobs
+    "WaitAlertP90Minutes": 5
+  }
 }
 ```
 
@@ -122,6 +139,16 @@ Each phase is independently useful and ends with something runnable.
 ### Phase 2: Agent pools, wait times and run times ⭐
 This is the priority after the core lists. Pools are organisation-level, so these pages sit outside the project picker.
 
+**Your agent setup**
+You have build, test and release agents, on a mix of Microsoft-hosted and self-hosted pools.
+- **Pool roles:** each pool gets a role (Build, Test or Release) from name patterns in config (see §3), with an "Unassigned" bucket for anything that doesn't match. The pages can then be filtered and compared by role, e.g. "release wait p90 this week compared with build wait p90".
+- **Self-hosted pools:** you get the full set: per-agent status, utilisation, failure rate and health warnings.
+- **Microsoft-hosted pools:** the agents are throwaway VMs, so per-agent pages don't apply. The relevant limit is your **parallel job count**, so the app shows running jobs against that limit and how long jobs queued because it was full. ADO has no documented API for the limit, so it's set in config.
+- **Release agents:**
+  - If they run classic Release pipelines, their jobs still appear in the pool's job history with `planType = Release`. The release definition name is looked up via the Release API (`vsrm.dev.azure.com/{org}/{project}/_apis/release/definitions`).
+  - If they're **deployment group** agents, they live in deployment pools (`GET _apis/distributedtask/pools?poolType=deployment`). They get the same treatment once confirmed that's how yours are set up.
+  - Either way, "top consumers" and the job list name the right pipeline, whether it's a YAML pipeline, a classic build or a classic release.
+
 **Data sources**
 | Data | REST endpoint | Notes |
 |---|---|---|
@@ -139,15 +166,15 @@ This is the priority after the core lists. Pools are organisation-level, so thes
 - Report p50 / p90 / p95 / max, not just averages, because waits are spiky.
 
 **Pages**
-1. **Pools overview:** one card per pool showing agents online/total, jobs running and queued right now, and p50/p90 wait and run time over the last 24h and 7d, with a red flag when p90 wait exceeds a threshold you set.
+1. **Pools overview:** cards grouped by role (Build / Test / Release) and marked Microsoft-hosted or self-hosted. Each card shows agents online/total (or parallel jobs used for Microsoft-hosted pools), jobs running and queued right now, and p50/p90 wait and run time over the last 24h and 7d, with a red flag when p90 wait exceeds `WaitAlertP90Minutes`.
 2. **Pool detail:**
    - Wait-time and run-time trend charts (daily percentiles).
    - **Heatmap of wait time by day of week × hour**, which shows when the pool is under-provisioned.
    - Concurrency vs capacity chart: running and queued jobs over time against online agent count.
    - **Top consumers:** pipelines ranked by total agent minutes and by total wait caused.
    - Job list with filters (pipeline, result, agent, date range) and sorting by wait or run time.
-3. **Agent detail:** status, version, key capabilities, jobs run, utilisation %, average run time, and **failure rate compared with the pool average**. An agent that fails far more often than its siblings is usually a broken machine, not broken pipelines.
-4. **Agent health warnings:** offline or disabled agents, agents on outdated versions, agents that have been idle for days, and agents with an unusually high failure rate.
+3. **Agent detail** (self-hosted): status, version, key capabilities, jobs run, utilisation %, average run time, and **failure rate compared with the pool average**. An agent that fails far more often than its siblings is usually a broken machine, not broken pipelines.
+4. **Agent health warnings** (self-hosted): offline or disabled agents, agents on outdated versions, agents that have been idle for days, and agents with an unusually high failure rate.
 5. **Per-pipeline view:** on the Phase 1 pipeline runs page, add a column and a chart for how long each run waited for an agent compared with how long it ran.
 
 **History collection**
@@ -158,6 +185,11 @@ ADO keeps only limited job history and `jobrequests` returns recent jobs. To get
 - prunes rows older than `RetentionDays`.
 
 The charts then read from SQLite and stay fast. Note that history starts when the collector first runs, so turn it on early.
+
+**Running locally means the collector only runs while the app does.** To cope with that:
+- **Catch-up on startup:** the collector first pulls everything `jobrequests` still returns since its last stored job. A gap of a few days (a weekend or a holiday) is usually filled automatically, as long as ADO still holds those jobs.
+- **Gaps are visible:** each poll is recorded, and charts shade periods where data may be missing rather than showing them as quiet.
+- **Optional always-on collector (later):** the collector lives in `DevOpsBlazor.Data`, so it can also be hosted by a tiny console app run from Windows Task Scheduler (or as a Windows service). History then keeps building with the UI closed. This is only worth doing if the catch-up proves not to be enough.
 
 ### Phase 3: Run detail and fast routes to the logs
 The app **does not fetch or render log content**. Instead, it gets you to the right log in the ADO portal in one click, which avoids pushing large logs through the server. Everything on this page comes from small JSON calls.
@@ -211,11 +243,11 @@ The app **does not fetch or render log content**. Instead, it gets you to the ri
 - **Paging:** list endpoints cap results (often 100–1000) and return a continuation token. Always go through the paging helper.
 - **Logs stay in ADO:** the app never downloads log content, so there's no large-payload streaming through the Blazor circuit. If an in-app log view is ever wanted, it would be a separate, opt-in feature.
 - **Timestamps:** ADO returns UTC. Store UTC and convert to local time only in the UI, which matters for the day × hour heatmap. Treat jobs with missing `assignTime` (cancelled while queued) separately rather than as zero wait.
-- **Microsoft-hosted pools:** wait time there reflects your *parallel job limit*, not machine count, so label those charts that way.
+- **Microsoft-hosted pools:** wait time there reflects your *parallel job limit*, not machine count, so label those charts that way. Keep `ParallelJobs` in config up to date if you buy more.
 - **Blazor Server circuits:** keep per-user state in scoped services, and dispose of `CancellationTokenSource`s when components are disposed so abandoned page loads stop calling ADO.
 - **Errors:** surface 401/403 with an actionable message ("Your PAT lacks the *Agent Pools (Read)* scope").
 - **Deep links:** every entity shows an "Open in Azure DevOps" link, so the app augments the portal rather than competing with it.
-- **Security:** never log tokens, keep the PAT out of `appsettings.json`, and if hosted, put it behind Entra ID auth (`Microsoft.Identity.Web`).
+- **Local security:** Kestrel listens on `localhost` only, so nothing else on the network can reach the app (and through it your PAT). Never log tokens, and keep the PAT in user-secrets, never in `appsettings.json`. The SQLite file holds only pipeline and job metadata, never the token.
 
 ---
 
@@ -235,11 +267,18 @@ The app **does not fetch or render log content**. Instead, it gets you to the ri
 
 ---
 
-## 7. Open questions
+## 7. Decisions and open questions
 
+**Decided**
+- **Runs locally only:** no hosting, no app login, and Kestrel bound to localhost.
+- **Authentication:** a PAT with read-only scopes, stored in user-secrets.
+- **Read-only:** no actions against ADO.
+- **Logs:** opened in the ADO portal through deep links, not viewed in the app.
+- **Agent pools:** you can already view them in the portal. They include build, test and release agents on a mix of Microsoft-hosted and self-hosted pools.
+
+**Still open**
 - One ADO organisation or several?
-- Local-only (`dotnet run`) or hosted (Azure App Service with Entra login)? Hosting decides when Phase 2 auth is needed. It also matters for the collector, which only gathers history while the app is running.
-- Is a PAT acceptable to start with, or is there an org policy restricting PATs?
-- Mostly self-hosted agent pools, Microsoft-hosted, or both?
-- Do you have org-level permission to view agent pools? *Agent Pools (Read)* on the token is needed, but so is pool access in ADO.
+- How are your pools named? Is there a pattern that tells build, test and release pools apart, so the role mapping can be pre-filled?
+- Do the release agents run classic Release pipelines, YAML deployment jobs, or are they deployment group agents?
+- How many Microsoft-hosted parallel jobs does the org have (*Organization settings → Parallel jobs*)?
 - What p90 wait time would you consider "bad"? It sets the default alert threshold.
