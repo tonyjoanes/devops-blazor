@@ -1,22 +1,27 @@
 # DevOps Blazor: Plan
 
-A personal, **read-only** Blazor app that sits alongside Azure DevOps (ADO). It answers the questions the ADO portal makes slow to answer: *what's broken, why, what's waiting on me, and are our agents keeping up?* It's built in small, shippable slices so new features are cheap to add.
+A personal, **read-only** Blazor app that runs locally next to Azure DevOps (ADO). It does two things the portal makes slow:
+
+1. **Pipelines at a glance:** the status and duration of the last batch of runs for each pipeline, with likely problems labelled, and one click through to ADO for logs and details.
+2. **Repo policy compliance:** a clear picture of which repos meet your branch policy baseline, which don't, and why.
+
+It's built in small, shippable slices so new features are cheap to add.
 
 ---
 
-## 1. Goals and non-goals
+## 1. Scope
 
-**Goals**
-- Fast, read-only views over repos, pipelines, runs, policies and agent pools.
-- One-click routes to the exact log in the ADO portal, rather than viewing logs in the app.
-- **Agent pool insight:** how long jobs wait for an agent, how long they run, and how busy each pool and agent is.
-- Views that span projects (and possibly organisations), which the portal does poorly.
-- An architecture where adding a feature means one API client method, one page and maybe one component.
+**In scope (MVP)**
+- Read-only views over pipelines and their recent runs: status, duration, queue wait and trends.
+- Automatic **problem labels** on runs and pipelines (failing streak, flaky, slow, and so on).
+- One-click deep links into ADO for logs, runs, pipelines and repo policy settings.
+- Repo policy viewer plus a **compliance matrix** against a baseline you define, with export.
 
-**Non-goals**
-- **Any write operation against ADO.** No queuing, retrying or cancelling runs, no approving, no editing. The only thing the app writes to is its own local database (see §4, Phase 2).
-- Replacing the ADO portal.
-- Hosting. The app is single user and **runs locally only** (`dotnet run`, browsing to `https://localhost`), so there's no app login and no cloud deployment.
+**Not now**
+- Any write operation against ADO (queue, retry, cancel, approve, edit).
+- Viewing log content in the app. Logs are opened in the ADO portal.
+- Agent pool analytics. The research is kept in §6 for later.
+- Hosting. The app runs locally (`dotnet run`, browse to `https://localhost`).
 
 ---
 
@@ -24,32 +29,26 @@ A personal, **read-only** Blazor app that sits alongside Azure DevOps (ADO). It 
 
 | Concern | Choice | Why |
 |---|---|---|
-| Framework | **.NET 10 (LTS), Blazor Web App** with **Interactive Server** render mode | Tokens and PATs stay on the server and are never shipped to the browser. Server-side HttpClient calls avoid CORS. Live updates come over SignalR for free. |
-| UI kit | **Microsoft Fluent UI Blazor** (`Microsoft.FluentUI.AspNetCore.Components`) | Looks native next to ADO. Includes a good `FluentDataGrid` with virtualisation, badges, a tree view and dialogs. (MudBlazor is a fine alternative.) |
-| ADO access | **Typed `HttpClient` against the ADO REST API (v7.1)**, behind our own interfaces | Lightweight and easy to mock. It gives full control over paging and continuation tokens and `$top`. The official `Microsoft.TeamFoundationServer.Client` SDK works but is heavy and lags the API. |
-| Resilience | `Microsoft.Extensions.Http.Resilience` (Polly) | Retries and backoff, and honours `Retry-After` on ADO 429/503 throttling. |
-| Caching | `HybridCache` (in-memory to start) | Repo and pipeline lists change rarely. Cache them for minutes; keep runs and agent status short-lived. |
-| Local store | **SQLite via EF Core**, a single file under `%LOCALAPPDATA%/DevOpsBlazor/` | Keeps a history of agent job data beyond what ADO retains, so wait and run time trends can cover weeks or months. A single local file needs no database server, and backup is just copying the file. |
-| Charts | ApexCharts.Blazor | Run duration and pass-rate trends, wait-time percentiles, pool heatmaps. |
-| Tests | xUnit + bUnit + `RichardSzalay.MockHttp` | Unit-test API clients against recorded JSON, and test components in isolation. |
+| Framework | **.NET 10 (LTS), Blazor Web App**, **Interactive Server** render mode | The PAT stays on the server. Server-side HttpClient calls avoid CORS. Simple to run locally. |
+| UI kit | **Microsoft Fluent UI Blazor** (`Microsoft.FluentUI.AspNetCore.Components`) | Looks native next to ADO. Includes `FluentDataGrid` (sort, filter, virtualise), badges, tooltips and dialogs. |
+| ADO access | **Typed `HttpClient` against the ADO REST API (v7.1)** behind our own interfaces | Lightweight, easy to mock, and gives full control over paging and query parameters. |
+| Resilience | `Microsoft.Extensions.Http.Resilience` | Retries and backoff, and honours `Retry-After` on ADO 429/503 throttling. |
+| Caching | `HybridCache` (in-memory) | Repo, pipeline and policy lists change rarely (cache for minutes). Runs are cached for about a minute. |
+| Charts | ApexCharts.Blazor | Duration sparklines and trends, compliance summary charts. |
+| Export | CsvHelper plus a simple Markdown writer | Compliance evidence for audits or tickets. |
+| Tests | xUnit + bUnit + `RichardSzalay.MockHttp` | Client tests against recorded JSON, rule tests, and component tests. |
 
-### Authentication: Personal Access Token (PAT)
-- Store the PAT in `dotnet user-secrets`, which keeps it in your user profile, outside the repo and out of `appsettings.json`. Send it as Basic auth (`:{PAT}` base64).
-- **Scopes (all read-only):**
-  - *Code (Read)*
-  - *Build (Read)*
-  - *Project and Team (Read)*
-  - *Agent Pools (Read)*
-  - *Release (Read)*, to name the classic release pipelines that run on your release agents
-  - *Test Management (Read)*, only if the flaky test feature is built
-- **PAT expiry:** a PAT can't read its own expiry date, so store it as `PatExpiresOn` next to the PAT in user-secrets. The top bar warns when it's within 7 days, and a 401 from ADO shows "PAT expired or revoked".
-- Token access sits behind an `IAdoTokenProvider` interface. If PATs are ever restricted, switching to Entra ID (`DefaultAzureCredential` with the ADO resource `499b84ac-1321-427f-aa17-267ca6975798/.default`, e.g. via your `az login`) changes only that class. Not planned for now.
+### Authentication: PAT, read-only
+- The PAT lives in `dotnet user-secrets`, never in `appsettings.json` or the repo. It's sent as Basic auth (`:{PAT}` base64).
+- **Scopes:** *Code (Read)*, *Build (Read)* and *Project and Team (Read)*. These cover pipelines, runs, timelines, repos and policies.
+- **PAT expiry:** a PAT can't read its own expiry date, so store it as `PatExpiresOn` next to the PAT. The top bar warns within 7 days, and a 401 shows "PAT expired or revoked".
+- Token access sits behind `IAdoTokenProvider`, so switching to Entra ID later would change only that class.
 
 ### Read-only by design
-Read-only is enforced in three places, not just by convention:
 - The PAT has only *(Read)* scopes, so ADO itself rejects any write.
-- `AdoHttpHandler` rejects any request that isn't `GET`, apart from an explicit allow-list of read-only `POST` queries (WIQL, code search).
+- `AdoHttpHandler` rejects any request that isn't `GET`.
 - Client interfaces expose only query methods.
+- Kestrel listens on `localhost` only.
 
 ---
 
@@ -61,224 +60,222 @@ devops-blazor/
 ├─ src/
 │  ├─ DevOpsBlazor.Web/                 # Blazor Web App (UI only)
 │  │  ├─ Components/
-│  │  │  ├─ Layout/                     # MainLayout, NavMenu, org/project picker
-│  │  │  └─ Shared/                     # StatusBadge, RelativeTime, Duration, OpenInAdo link, Loading/Error states
-│  │  ├─ Features/                      # one folder per feature (vertical slices)
-│  │  │  ├─ Repositories/               # RepoList.razor, RepoDetail.razor
-│  │  │  ├─ Pipelines/                  # PipelineList.razor, PipelineRuns.razor, RunDetail.razor
-│  │  │  ├─ Agents/                     # PoolList.razor, PoolDetail.razor, AgentDetail.razor
-│  │  │  ├─ Policies/
-│  │  │  └─ Dashboard/
+│  │  │  ├─ Layout/                     # MainLayout, NavMenu, project picker, PAT-expiry banner
+│  │  │  └─ Shared/                     # StatusBadge, ProblemLabel, Duration, RunStrip, OpenInAdo, Loading/Error
+│  │  ├─ Features/
+│  │  │  ├─ Pipelines/                  # PipelineList, PipelineRuns, RunDetail
+│  │  │  └─ Compliance/                 # PolicyMatrix, RepoPolicies, ComplianceSummary
 │  │  └─ Program.cs
-│  ├─ DevOpsBlazor.AzureDevOps/         # ADO client library (no UI dependencies)
+│  ├─ DevOpsBlazor.AzureDevOps/         # ADO client library (no UI)
 │  │  ├─ Auth/                          # IAdoTokenProvider, PatTokenProvider
-│  │  ├─ Http/                          # AdoHttpHandler (auth, api-version, read-only guard, paging helper)
-│  │  ├─ Links/                         # AdoLinks: builds portal URLs (run, job/task log, logs zip, repo, pool)
-│  │  ├─ Clients/                       # IGitClient, IBuildClient, IPolicyClient, IAgentPoolClient, ...
-│  │  ├─ Models/                        # DTO records mapped from REST JSON
-│  │  └─ ServiceCollectionExtensions.cs # AddAzureDevOps(config)
-│  ├─ DevOpsBlazor.Core/                # logic with no I/O: wait/run time stats, percentiles, policy audit rules
-│  └─ DevOpsBlazor.Data/                # EF Core + SQLite: job request history, watchlist
-│     └─ Collectors/                    # AgentJobCollector (IHostedService that polls and stores job history)
+│  │  ├─ Http/                          # AdoHttpHandler (auth, api-version, GET-only guard, error mapping), paging helper
+│  │  ├─ Links/                         # AdoLinks: every portal URL is built here
+│  │  ├─ Clients/                       # IProjectClient, IBuildClient, IGitClient, IPolicyClient
+│  │  └─ Models/
+│  └─ DevOpsBlazor.Core/                # logic with no I/O
+│     ├─ RunAnalysis/                   # duration stats, problem-label detectors
+│     └─ Compliance/                    # effective-policy resolver, rules, evaluator
 └─ tests/
-   ├─ DevOpsBlazor.AzureDevOps.Tests/   # client tests against recorded JSON fixtures
-   ├─ DevOpsBlazor.Core.Tests/          # stats and rules tests
-   └─ DevOpsBlazor.Web.Tests/           # bUnit component tests
+   ├─ DevOpsBlazor.AzureDevOps.Tests/
+   ├─ DevOpsBlazor.Core.Tests/          # most of the value: labels and rules against fixture data
+   └─ DevOpsBlazor.Web.Tests/
 ```
 
-**Configuration** (`appsettings.json` with secrets elsewhere):
+**Configuration** (`appsettings.json`; the PAT goes in user-secrets):
 ```json
 "AzureDevOps": {
-  "Organizations": [
-    { "Name": "contoso", "Url": "https://dev.azure.com/contoso", "DefaultProject": "Platform" }
-  ],
-  "AuthMode": "Pat",
-  "CacheMinutes": { "Repos": 10, "Pipelines": 10, "Runs": 1, "Agents": 1 },
-  "AgentJobCollector": { "Enabled": true, "PollMinutes": 15, "RetentionDays": 180 },
-  "AgentPools": {
-    "Roles": {                                   // pool name patterns → role, used to group the pool pages
-      "Build":   [ "*Build*" ],
-      "Test":    [ "*Test*" ],
-      "Release": [ "*Release*", "*Deploy*" ]
-    },
-    "MicrosoftHosted": { "ParallelJobs": 10 },   // from Organization settings → Parallel jobs
-    "WaitAlertP90Minutes": 5
-  }
-}
+  "Organization": "https://dev.azure.com/contoso",
+  "Projects": [ "Platform", "Payments" ],          // empty = all projects
+  "RunsPerPipeline": 20,
+  "CacheMinutes": { "Pipelines": 10, "Runs": 1, "Policies": 10 }
+},
+"RunLabels": {
+  "SlowFactor": 1.5,              // duration > 1.5 × median of recent successful runs
+  "LongQueueMinutes": 10,
+  "FlakyFlipsThreshold": 3,       // pass↔fail flips on the same branch within the window
+  "StaleDays": 30
+},
+"Compliance": { "BaselineFile": "compliance-baseline.json" }
 ```
 
-**Key cross-cutting pieces to build first**
-- `AdoHttpHandler`: adds the auth header and `api-version=7.1`, enforces the read-only guard, logs the request, and maps failures (401 → "PAT expired or invalid", 403 → "missing scope X", 404 and 429) to typed exceptions the UI can show nicely.
-- `PagedAsync<T>()` helper: follows the `x-ms-continuationtoken` header and `continuationToken` query parameter, and returns `IAsyncEnumerable<T>`.
-- Org/project context: a scoped `AdoContext` service plus a picker in the top bar, kept in the URL (`/contoso/Platform/pipelines`) so links can be shared and bookmarked.
-- Shared components for `StatusBadge` (succeeded, failed, partiallySucceeded, canceled, inProgress), durations, relative time, empty, loading and error states, and deep links back to the ADO portal (via `AdoLinks`).
+**Cross-cutting pieces to build first**
+- `AdoHttpHandler`: adds the auth header and `api-version=7.1`, enforces GET-only, and maps 401/403/404/429 to typed exceptions with actionable messages ("PAT lacks *Build (Read)*").
+- `PagedAsync<T>()`: follows `x-ms-continuationtoken` and returns `IAsyncEnumerable<T>`.
+- `AdoLinks`: one place that builds every portal URL. Portal URLs aren't a formal API, so if one changes there's one place to fix.
+- Shared components: `StatusBadge`, `ProblemLabel` (a chip with a tooltip that explains *why*), `RunStrip` (a row of coloured dots for the last N runs), `Duration`, and `OpenInAdo`.
 
 ---
 
 ## 4. Feature roadmap
 
-Each phase is independently useful and ends with something runnable.
-
 ### Phase 0: Skeleton (½–1 day)
-- `dotnet new blazor --interactivity Server`, add Fluent UI and create the solution and projects above.
-- PAT via user-secrets, `AddAzureDevOps()`, and a health page that calls `GET _apis/connectionData` to show *who am I / is my token OK*. It also checks which of the needed scopes work.
-- Project list (`GET {org}/_apis/projects`) and the org/project picker.
-- CI: a GitHub Actions workflow that builds and tests on push.
+- `dotnet new blazor --interactivity Server`, add Fluent UI, and create the projects above.
+- PAT via user-secrets. A health page calls `GET _apis/connectionData` to show *who am I / is the token OK*, and checks each needed scope.
+- Project picker (`GET _apis/projects`), filtered by `Projects` in config.
+- CI: a GitHub Actions build-and-test workflow.
 
-### Phase 1: Repositories and pipelines
-| Feature | REST endpoint(s) |
+### Phase 1: Pipelines and recent runs
+**Pipeline list** (per project, or all configured projects):
+
+| Column | Source |
 |---|---|
-| **List repositories** with default branch, size and last update, plus a filter box | `GET {project}/_apis/git/repositories` |
-| Repo detail: branches with ahead/behind counts against the default branch | `GET .../git/repositories/{id}/stats/branches` |
-| **List pipelines** with folder tree, filter, and the last run's result inline | `GET .../build/definitions?includeLatestBuilds=true` (gives the last result in one call) |
-| **Click a pipeline → last N runs** (N selectable: 10/25/50) with result, status, branch, trigger reason, who started it, queue wait, duration and commit | `GET .../build/builds?definitions={id}&$top={N}&queryOrder=queueTimeDescending` |
-| **Pass/fail at a glance**: colour-coded badges plus a pass-rate % and duration sparkline for the last N runs | computed from the runs above |
+| Name, folder, type (YAML / classic) | `GET {project}/_apis/build/definitions?includeLatestBuilds=true` |
+| **Run strip**: coloured dots for the last N runs on the default branch (hover shows result, duration and date; click opens the run) | `GET {project}/_apis/build/builds?definitions={ids}&maxBuildsPerDefinition={N}&queryOrder=finishTimeDescending`. This is **one call for many pipelines**, not one per pipeline. |
+| Last result, last run time, pass rate over N | computed |
+| Median duration plus a sparkline | computed |
+| Problem labels (Phase 2) | computed |
+| Open in ADO | `AdoLinks.Pipeline(...)` |
 
-> I'd use the **Build API** (`_apis/build/builds`) rather than the newer Pipelines Runs API for run lists. It supports `$top`, branch and result filters, and returns richer data (reason, requestedFor, sourceVersion, and `queueTime`/`startTime`/`finishTime`, which give a first measure of wait time per run).
+Filter by folder, name, result and "has problems". Sort by any column.
 
-### Phase 2: Agent pools, wait times and run times ⭐
-This is the priority after the core lists. Pools are organisation-level, so these pages sit outside the project picker.
+**Pipeline runs page** (click a pipeline): the last N runs (10/25/50) with:
+- build number, result, status, branch, trigger reason, who started it, commit,
+- **queue wait** (`startTime − queueTime`) and **duration** (`finishTime − startTime`),
+- a duration trend chart with successful and failed runs coloured differently, plus a median line,
+- a branch filter (default branch / all / a specific branch),
+- **Open in ADO**, **Open logs** and **Open first failure** per run (see below).
 
-**Your agent setup**
-You have build, test and release agents, on a mix of Microsoft-hosted and self-hosted pools.
-- **Pool roles:** each pool gets a role (Build, Test or Release) from name patterns in config (see §3), with an "Unassigned" bucket for anything that doesn't match. The pages can then be filtered and compared by role, e.g. "release wait p90 this week compared with build wait p90".
-- **Self-hosted pools:** you get the full set: per-agent status, utilisation, failure rate and health warnings.
-- **Microsoft-hosted pools:** the agents are throwaway VMs, so per-agent pages don't apply. The relevant limit is your **parallel job count**, so the app shows running jobs against that limit and how long jobs queued because it was full. ADO has no documented API for the limit, so it's set in config.
-- **Release agents:**
-  - If they run classic Release pipelines, their jobs still appear in the pool's job history with `planType = Release`. The release definition name is looked up via the Release API (`vsrm.dev.azure.com/{org}/{project}/_apis/release/definitions`).
-  - If they're **deployment group** agents, they live in deployment pools (`GET _apis/distributedtask/pools?poolType=deployment`). They get the same treatment once confirmed that's how yours are set up.
-  - Either way, "top consumers" and the job list name the right pipeline, whether it's a YAML pipeline, a classic build or a classic release.
+### Phase 2: Problem labels and run detail
+**Problem labels** are computed in `DevOpsBlazor.Core.RunAnalysis` from data already fetched. Each label has a tooltip that explains the evidence (e.g. "Failed on the last 4 runs of `main`, since 12 Oct, after commit a1b2c3").
 
-**Data sources**
-| Data | REST endpoint | Notes |
+| Label | Applies to | Rule (thresholds configurable) |
 |---|---|---|
-| Pools (self-hosted and Microsoft-hosted), size, type | `GET {org}/_apis/distributedtask/pools` | |
-| Agents in a pool: online/offline, enabled, version, OS, capabilities, current job, last completed job | `GET {org}/_apis/distributedtask/pools/{poolId}/agents?includeCapabilities=true&includeAssignedRequest=true&includeLastCompletedRequest=true` | |
-| **Job history for a pool** (the portal's pool *Jobs* tab) | `GET {org}/_apis/distributedtask/pools/{poolId}/jobrequests` | Each request has `queueTime`, `assignTime`, `receiveTime`, `finishTime`, `result`, the agent that ran it, and the pipeline/definition that owns it. This is the main source for wait and run times. It's **not formally documented**, so it's wrapped in `IAgentPoolClient` with fixture tests to catch shape changes. |
-| Fallback / per-job detail | build timeline (`.../build/builds/{id}/timeline`): job records have `startTime`, `finishTime`, `workerName` | Used if `jobrequests` misbehaves, and to link a job back to its stage and run. |
-| Long-range trends (optional, later) | Analytics OData (`analytics.dev.azure.com/{org}/_odata/...`, e.g. `TaskAgentRequestSnapshots`, `PipelineRuns`) | Powers ADO's own *pool consumption* report. Worth trying if Analytics is enabled in your org; parts of it are preview. |
+| 🔴 **Broken** | pipeline | The latest run on the default branch failed. Shows the streak length and "failing since". |
+| 🟠 **Flaky** | pipeline | Results flip between pass and fail at least `FlakyFlipsThreshold` times on the same branch in the window, especially reruns of the same commit that passed. |
+| 🟡 **Slow** | run | Duration is more than `SlowFactor` × the median of recent successful runs. |
+| 🟡 **Getting slower** | pipeline | The median duration of the latest third of runs is noticeably higher than the earliest third. |
+| 🟡 **Long queue** | run | Queue wait is more than `LongQueueMinutes`, a hint about agent capacity. |
+| 🟠 **Partially succeeded** | run | Result is `partiallySucceeded`, i.e. a step with `continueOnError` failed and was hidden. |
+| ⚪ **Timed out / cancelled** | run | Result is cancelled, or a timeline issue mentions a timeout. |
+| 🔁 **Retried** | run | A timeline record has `attempt > 1` (stages or jobs were rerun). |
+| ⚠️ **Warnings rising** | pipeline | The timeline warning count is trending up. |
+| 💤 **Stale** | pipeline | No runs in `StaleDays` days. It may be dead or have a disabled trigger. |
 
-**Metric definitions** (computed in `DevOpsBlazor.Core`)
-- **Wait time** = `assignTime − queueTime`: how long the job waited for a free agent.
-- **Run time** = `finishTime − assignTime`, or `finishTime − receiveTime` when present.
-- **Utilisation** (per agent, per pool) = busy time ÷ online time over the window.
-- **Concurrency** = jobs running at once over time, compared with pool size (online agents).
-- Report p50 / p90 / p95 / max, not just averages, because waits are spiky.
+Labels that need the timeline (Retried, Warnings rising, Timed out) fetch it lazily, for the runs on screen only.
 
-**Pages**
-1. **Pools overview:** cards grouped by role (Build / Test / Release) and marked Microsoft-hosted or self-hosted. Each card shows agents online/total (or parallel jobs used for Microsoft-hosted pools), jobs running and queued right now, and p50/p90 wait and run time over the last 24h and 7d, with a red flag when p90 wait exceeds `WaitAlertP90Minutes`.
-2. **Pool detail:**
-   - Wait-time and run-time trend charts (daily percentiles).
-   - **Heatmap of wait time by day of week × hour**, which shows when the pool is under-provisioned.
-   - Concurrency vs capacity chart: running and queued jobs over time against online agent count.
-   - **Top consumers:** pipelines ranked by total agent minutes and by total wait caused.
-   - Job list with filters (pipeline, result, agent, date range) and sorting by wait or run time.
-3. **Agent detail** (self-hosted): status, version, key capabilities, jobs run, utilisation %, average run time, and **failure rate compared with the pool average**. An agent that fails far more often than its siblings is usually a broken machine, not broken pipelines.
-4. **Agent health warnings** (self-hosted): offline or disabled agents, agents on outdated versions, agents that have been idle for days, and agents with an unusually high failure rate.
-5. **Per-pipeline view:** on the Phase 1 pipeline runs page, add a column and a chart for how long each run waited for an agent compared with how long it ran.
-
-**History collection**
-ADO keeps only limited job history and `jobrequests` returns recent jobs. To get real trends, the `AgentJobCollector` background service:
-- polls each pool's `jobrequests` every N minutes (configurable),
-- upserts finished jobs into SQLite keyed on `requestId`,
-- records a pool-size snapshot (online agents) at each poll, for the capacity charts,
-- prunes rows older than `RetentionDays`.
-
-The charts then read from SQLite and stay fast. Note that history starts when the collector first runs, so turn it on early.
-
-**Running locally means the collector only runs while the app does.** To cope with that:
-- **Catch-up on startup:** the collector first pulls everything `jobrequests` still returns since its last stored job. A gap of a few days (a weekend or a holiday) is usually filled automatically, as long as ADO still holds those jobs.
-- **Gaps are visible:** each poll is recorded, and charts shade periods where data may be missing rather than showing them as quiet.
-- **Optional always-on collector (later):** the collector lives in `DevOpsBlazor.Data`, so it can also be hosted by a tiny console app run from Windows Task Scheduler (or as a Windows service). History then keeps building with the UI closed. This is only worth doing if the catch-up proves not to be enough.
-
-### Phase 3: Run detail and fast routes to the logs
-The app **does not fetch or render log content**. Instead, it gets you to the right log in the ADO portal in one click, which avoids pushing large logs through the server. Everything on this page comes from small JSON calls.
+**Run detail page** (all small JSON calls, no log content):
 
 | Feature | Source |
 |---|---|
-| **Run timeline**: stages → jobs → tasks tree with result, duration, agent name and error/warning counts, with failed nodes auto-expanded | `GET .../build/builds/{buildId}/timeline` |
-| **"Open log" on every task** | Deep link to the portal's log view focused on that job and task: `https://dev.azure.com/{org}/{project}/_build/results?buildId={buildId}&view=logs&j={jobRecordId}&t={taskRecordId}` (record ids come from the timeline). |
-| **"Open first failure"** button at the top of a failed run, and in the runs list | The same deep link, aimed at the first failed task in the timeline. |
-| **Error summary**: the error and warning messages from the timeline (`record.issues`) listed at the top of the run page, often enough to see what broke without opening the log at all | timeline |
-| **Download all logs (zip)** link | A plain browser link to `https://dev.azure.com/{org}/{project}/_apis/build/builds/{buildId}/logs?$format=zip`. The download comes straight from ADO using your browser's existing ADO sign-in, not through the app. |
-| Copy-link buttons for a run, job or task | built from the same URLs |
-| Artifacts list, with links into the portal | `GET .../build/builds/{buildId}/artifacts` |
-| Changes in this run (commits) | `GET .../build/builds/{buildId}/changes` |
+| Stages → jobs → tasks tree with result, duration and error/warning counts, with failed nodes expanded | `GET .../build/builds/{id}/timeline` |
+| **Error summary**: the error messages from `record.issues`, which often show what broke without opening the log | timeline |
+| **Open log** per task | `https://dev.azure.com/{org}/{project}/_build/results?buildId={id}&view=logs&j={jobId}&t={taskId}` |
+| **Open first failure** | the same link, aimed at the first failed task |
+| **Download logs (zip)** | a plain browser link to `.../_apis/build/builds/{id}/logs?$format=zip`, downloaded directly from ADO with your browser's sign-in |
+| Commits in the run | `GET .../build/builds/{id}/changes` |
+| Copy-link buttons | `AdoLinks` |
 
-> The portal URL format is not a formal API, so all ADO links are built in one `AdoLinks` helper. If Microsoft changes the format, there's one place to fix.
+### Phase 3: Repo policy viewer
+**Data** (per project, kept to a few calls):
 
-### Phase 4: Repo policies
-| Feature | REST endpoint(s) |
+| Data | REST endpoint |
 |---|---|
-| **Policies on a repo/branch**: min reviewers, required reviewers, build validation, comment resolution, linked work items, merge strategy | `GET {project}/_apis/policy/configurations?repositoryId={id}&refName=refs/heads/main` |
-| Friendly names and settings rendering for each policy type | `GET {project}/_apis/policy/types` |
-| **Policy audit matrix**: every repo as a row, each policy as a column, highlighting repos whose default branch has *no* PR policy, too few reviewers or no build validation | the same calls, fanned out across repos |
+| Repos (name, default branch, disabled flag) | `GET {project}/_apis/git/repositories` |
+| **All policy configurations in the project, in one call** | `GET {project}/_apis/policy/configurations` |
+| Policy type names | `GET {project}/_apis/policy/types` |
+| Cross-check of the effective policies for one repo and branch | `GET {project}/_apis/git/policy/configurations?repositoryId={id}&refName=refs/heads/{branch}` |
 
-### Phase 5: "What needs my attention?" dashboard (read-only)
-- **My PRs and PRs awaiting my review** across all projects: `GET _apis/git/pullrequests?searchCriteria.reviewerId={me}&searchCriteria.status=active`.
-- **Pending pipeline approvals for me**: `GET {project}/_apis/pipelines/approvals?state=pending`. These are listed with a link to approve in ADO; there's no in-app approve button.
-- **Red board**: every pipeline whose latest run on the default branch failed, across projects.
-- **Agent pool tile**: queued jobs right now and current p90 wait for each pool, from Phase 2.
-- **Watchlist**: pin favourite pipelines, repos and pools, stored in the local SQLite database.
+**Effective-policy resolver** (`Core.Compliance`). A policy's `settings.scope` can target:
+- a specific repo and branch,
+- a branch prefix (`matchKind: Prefix`, e.g. `refs/heads/release/`),
+- every repo in the project (`repositoryId: null`),
+- the repo itself with no branch (repository-level policies such as file size limits, path length, reserved names and commit author email).
 
-### Further ideas (backlog, roughly by value)
-1. **Flaky test detector**: use the Test Runs/Results APIs to find tests that flip between pass and fail on the same commit or branch.
-2. **Pipeline trends**: duration and pass rate over 30/90 days.
-3. **Error search**: search the timeline error messages (`record.issues`) across the last N runs ("when did this error first appear?"). This uses timeline data, not log files.
-4. **Compare two runs**: diff of commits, parameters, variables, agent used and failed tasks between a good run and a bad one.
-5. **Capacity what-if**: replay the stored job history against a hypothetical pool size to estimate how much adding N agents would cut p90 wait.
-6. **Service connections and variable groups inventory**: who uses what, plus a search for which pipelines reference a given variable group (`serviceendpoint/endpoints`, `distributedtask/variablegroups`).
-7. **Stale branch report**: branches with no commits in X days, or already merged into main.
-8. **Release notes generator**: work items and commits between two runs or tags, exported as Markdown.
-9. **Cross-repo code search** (`almsearch.dev.azure.com/.../_apis/search/codesearchresults`).
-10. **YAML viewer**: show the pipeline's YAML (fetched from the repo) with template references linked.
-11. **Notifications**: a background service watches the watchlist and pushes toast notifications when a watched pipeline fails or a pool's wait time spikes.
-12. **Multi-org support**: the config already allows it; the picker switches the org.
+The resolver works out which policies **actually apply** to each repo's default branch (and any other branches you care about, e.g. `release/*`), along with **where each one comes from** (project-wide vs repo-specific). Policies that are disabled (`isEnabled: false`) or not blocking (`isBlocking: false`, i.e. optional) are kept but flagged, because "configured but optional" is a common compliance gap.
+
+**Per-repo policy page:** a readable card for each effective policy:
+- **Minimum reviewers:** count, whether the author's own approval counts (`creatorVoteCounts`), whether votes reset on new pushes (`resetOnSourcePush`), and whether "approve with suggestions" or "waiting for author" block the merge.
+- **Build validation:** which pipeline, blocking or optional, expiry, path filters.
+- **Required reviewers:** who, and for which paths.
+- **Comment resolution**, **linked work items** and **merge strategy** (which merge types are allowed).
+- **Repository-level policies** (file size, path length, reserved names, author email).
+
+Each card links to the repo's policy settings in ADO.
+
+### Phase 4: Compliance baseline and visualisation
+**Baseline as data.** `compliance-baseline.json` lists the rules your repos should meet. Each rule has an id, a severity (High / Medium / Low), parameters, and the branches it applies to:
+```json
+{
+  "branches": [ "default", "release/*" ],
+  "rules": [
+    { "id": "MinReviewers",           "severity": "High",   "min": 2 },
+    { "id": "NoSelfApproval",         "severity": "High" },
+    { "id": "ResetVotesOnPush",       "severity": "Medium" },
+    { "id": "BuildValidationBlocking","severity": "High" },
+    { "id": "CommentResolution",      "severity": "Medium" },
+    { "id": "LinkedWorkItems",        "severity": "Low" },
+    { "id": "AllowedMergeTypes",      "severity": "Low",    "allowed": [ "squash" ] },
+    { "id": "DefaultBranchIsMain",    "severity": "Low" },
+    { "id": "PoliciesAreBlocking",    "severity": "High" }
+  ],
+  "exemptions": [
+    { "repo": "Platform/sandbox", "rules": [ "*" ], "reason": "Personal playground", "until": "2027-01-01" }
+  ]
+}
+```
+Each rule is a small `IComplianceRule` class that takes a repo's effective policies and returns **Pass / Fail / Warn / Exempt / N/A**, plus a human-readable reason ("Min reviewers is 1, baseline requires 2", "Build validation exists but is optional"). New rules are one class and one test.
+
+**Visualisations**
+1. **Compliance matrix (main view):** repos as rows and rules as columns. Cells are coloured by outcome (green pass, red fail, amber warn, grey exempt or N/A). Hovering a cell shows the reason, and clicking it opens the per-repo page. You can sort by "most failures", filter by project, severity or outcome, and hide disabled repos.
+2. **Summary header:** % of repos fully compliant, a bar of failures per rule (which rule is broken most often), and a per-project breakdown.
+3. **Per-repo scorecard:** the repo's rule results plus its effective policies (from Phase 3), with "Fix in ADO" links to the right settings page.
+4. **Policy source view:** shows whether a repo is covered by project-wide policies or repo-specific ones. This matters when deciding whether to fix a gap once at project level or repo by repo.
+
+**Export:** the whole matrix to CSV, and a Markdown or HTML report (summary plus failures with reasons) to attach to tickets or audits. The report is stamped with the date and the baseline version.
+
+**Later, optional:** save a compliance snapshot each time you run it (a local JSON or SQLite file), so you can see compliance improve over time and diff "what changed since last month".
 
 ---
 
 ## 5. Design notes and gotchas
 
-- **Throttling:** ADO rate-limits per user (TSTUs). Fan-out views (policy audit, red board, collector polling every pool) should limit concurrency (`Parallel.ForEachAsync` with `MaxDegreeOfParallelism ≈ 4–8`), cache results and honour `Retry-After`.
-- **Paging:** list endpoints cap results (often 100–1000) and return a continuation token. Always go through the paging helper.
-- **Logs stay in ADO:** the app never downloads log content, so there's no large-payload streaming through the Blazor circuit. If an in-app log view is ever wanted, it would be a separate, opt-in feature.
-- **Timestamps:** ADO returns UTC. Store UTC and convert to local time only in the UI, which matters for the day × hour heatmap. Treat jobs with missing `assignTime` (cancelled while queued) separately rather than as zero wait.
-- **Microsoft-hosted pools:** wait time there reflects your *parallel job limit*, not machine count, so label those charts that way. Keep `ParallelJobs` in config up to date if you buy more.
-- **Blazor Server circuits:** keep per-user state in scoped services, and dispose of `CancellationTokenSource`s when components are disposed so abandoned page loads stop calling ADO.
-- **Errors:** surface 401/403 with an actionable message ("Your PAT lacks the *Agent Pools (Read)* scope").
-- **Deep links:** every entity shows an "Open in Azure DevOps" link, so the app augments the portal rather than competing with it.
-- **Local security:** Kestrel listens on `localhost` only, so nothing else on the network can reach the app (and through it your PAT). Never log tokens, and keep the PAT in user-secrets, never in `appsettings.json`. The SQLite file holds only pipeline and job metadata, never the token.
+- **Throttling:** ADO rate-limits per user. Prefer **one call per project** (all builds via `maxBuildsPerDefinition`, all policies via `policy/configurations`) over one call per pipeline or repo, cap concurrency at about 4, and honour `Retry-After`.
+- **Paging:** always go through the paging helper. `policy/configurations` and `builds` both page.
+- **Durations:** use UTC throughout and convert to local time only in the UI. A run still in progress has no `finishTime`; show it as "running for X" and leave it out of medians.
+- **Label quality:** labels are hints, not verdicts. Each tooltip shows its evidence, and each threshold is configurable, so they can be tuned once real data shows what's noisy.
+- **Policy scope matching:** project-wide and prefix-scoped policies are where compliance tools usually get it wrong. The resolver gets the most tests, with fixtures covering each scope shape, and the `git/policy/configurations` endpoint is used to cross-check it.
+- **Deep links:** everything shows an "Open in ADO" link, so the app adds to the portal rather than replacing it.
+- **Local security:** listens on localhost only, never logs the token, and keeps the PAT in user-secrets only.
 
 ---
 
-## 6. Suggested order of first PRs
+## 6. Later (parked)
+
+- **Agent pools:** wait and run times per pool and agent, with build/test/release roles and Microsoft-hosted vs self-hosted handling. Data comes from `distributedtask/pools`, `/agents` and `/jobrequests` (the last is undocumented), with history kept in SQLite by a background collector. The "Long queue" label in Phase 2 is a lightweight first signal for this.
+- **"What needs my attention?" dashboard:** my PRs, PRs awaiting my review, pending approvals (read-only, linking to ADO), and a board of every currently failing pipeline.
+- **Error search:** search timeline error messages across recent runs ("when did this error first appear?").
+- **Compare two runs:** commits, parameters and failed tasks for a good run vs a bad one.
+- **Stale branch report**, **branch permissions** compliance (Security API), **flaky test detector** (Test API), **release notes generator**.
+- **Multi-org support:** the config shape can be extended to a list.
+
+---
+
+## 7. Suggested order of PRs
 
 1. Solution skeleton, Fluent UI layout, CI workflow.
-2. `DevOpsBlazor.AzureDevOps`: auth handler, read-only guard, error mapping, paging helper and tests.
+2. `DevOpsBlazor.AzureDevOps`: auth, GET-only guard, error mapping, paging, `AdoLinks`, and tests.
 3. Health page and project picker.
-4. Repository list.
-5. Pipeline list → pipeline runs page (last N, pass/fail, queue wait, sparkline).
-6. Agent pools overview and agent list (live status).
-7. Job history: the `jobrequests` client, wait/run stats in Core, and the pool detail page.
-8. SQLite store and `AgentJobCollector`, then trend charts and the heatmap.
-9. Run detail: timeline tree, error summary, `AdoLinks` with "open log" / "open first failure" / zip links.
-10. Repo policies page, then the policy audit matrix.
-11. Dashboard: my PRs, approvals, red board, pool tile.
+4. Pipeline list with run strip, last result and median duration.
+5. Pipeline runs page: durations, queue wait, trend chart, deep links.
+6. Problem labels (non-timeline ones first), then the run detail page with timeline, error summary and "open first failure".
+7. Policy client and effective-policy resolver, with thorough tests.
+8. Per-repo policy page.
+9. Compliance baseline, rules and matrix view.
+10. Summary charts and CSV/Markdown export.
 
 ---
 
-## 7. Decisions and open questions
+## 8. Decisions and open questions
 
 **Decided**
-- **Runs locally only:** no hosting, no app login, and Kestrel bound to localhost.
-- **Authentication:** a PAT with read-only scopes, stored in user-secrets.
-- **Read-only:** no actions against ADO.
-- **Logs:** opened in the ADO portal through deep links, not viewed in the app.
-- **Agent pools:** you can already view them in the portal. They include build, test and release agents on a mix of Microsoft-hosted and self-hosted pools.
+- Runs locally only. A PAT with read-only scopes, kept in user-secrets.
+- Read-only: no actions against ADO.
+- Logs and other details are opened in the ADO portal through deep links.
+- MVP focus: pipelines and runs (status, duration, problem labels), plus repo policy compliance.
+- Agent analytics are parked.
 
-**Still open**
-- One ADO organisation or several?
-- How are your pools named? Is there a pattern that tells build, test and release pools apart, so the role mapping can be pre-filled?
-- Do the release agents run classic Release pipelines, YAML deployment jobs, or are they deployment group agents?
-- How many Microsoft-hosted parallel jobs does the org have (*Organization settings → Parallel jobs*)?
-- What p90 wait time would you consider "bad"? It sets the default alert threshold.
+**Open**
+- One ADO organisation? Roughly how many projects, repos and pipelines? Scale affects caching and paging choices.
+- What's your compliance baseline? The rules in Phase 4 are a starting guess. Which matter, and at what thresholds (e.g. 1 or 2 reviewers, self-approval allowed)?
+- Which branches must be protected: just the default branch, or also `release/*` or others?
+- Do your repos mostly rely on **project-wide** policies or **per-repo** ones?
