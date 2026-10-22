@@ -1,0 +1,13 @@
+@if (Labels.Count > 0)
+{
+    <span class="labels">
+        @foreach (var label in Labels)
+        {
+            <ProblemLabelChip Label="label" />
+        }
+    </span>
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<ProblemLabel> Labels { get; set; } = [];
+}

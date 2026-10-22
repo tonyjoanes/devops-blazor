@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet restore DevOpsBlazor.slnx
+      - run: dotnet build DevOpsBlazor.slnx --no-restore --configuration Release -warnaserror
+      - run: dotnet test DevOpsBlazor.slnx --no-build --configuration Release

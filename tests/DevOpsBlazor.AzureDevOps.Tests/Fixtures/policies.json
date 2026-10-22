@@ -1,0 +1,21 @@
+{
+  "count": 3,
+  "value": [
+    {
+      "id": 1, "isEnabled": true, "isBlocking": true, "isDeleted": false,
+      "type": { "id": "fa4e907d-c16b-4a4c-9dfa-4906e5d171dd", "displayName": "Minimum number of reviewers" },
+      "settings": { "minimumApproverCount": 2, "creatorVoteCounts": false,
+        "scope": [ { "refName": "refs/heads/main", "matchKind": "Exact", "repositoryId": "11111111-1111-1111-1111-111111111111" } ] }
+    },
+    {
+      "id": 2, "isEnabled": true, "isBlocking": false,
+      "type": { "id": "c6a1889d-b943-4856-b76f-9e46bb6b0df2", "displayName": "Comment requirements" },
+      "settings": { "scope": [ { "refName": null, "matchKind": "DefaultBranch", "repositoryId": null } ] }
+    },
+    {
+      "id": 3, "isEnabled": true, "isBlocking": true,
+      "type": { "id": "2e26e725-8201-4edd-8bf5-978563c34a80", "displayName": "File size restriction" },
+      "settings": { "maximumGitBlobSizeInBytes": 1048576, "scope": [ { "repositoryId": null } ] }
+    }
+  ]
+}

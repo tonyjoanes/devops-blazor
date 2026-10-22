@@ -1,0 +1,20 @@
+@* A row of dots, oldest on the left, newest on the right. Each links to the run. *@
+<span class="run-strip">
+    @foreach (var run in Runs.Take(Max).Reverse())
+    {
+        <a href="@AppRoutes.Run(run.Project, run.Id)" title="@Tooltip(run)"><span class="dot dot-@ResultCss.For(run)"></span></a>
+    }
+</span>
+
+@code {
+    /// <summary>Runs, newest first.</summary>
+    [Parameter, EditorRequired] public IReadOnlyList<PipelineRun> Runs { get; set; } = [];
+
+    [Parameter] public int Max { get; set; } = 20;
+
+    private static string Tooltip(PipelineRun run)
+    {
+        var outcome = run.IsCompleted ? run.Result.ToString() : run.Status.ToString();
+        return $"#{run.BuildNumber} · {outcome} · {DisplayFormat.Duration(run.Duration)} · {run.BranchName} · {DisplayFormat.Relative(run.When, DateTimeOffset.UtcNow)}";
+    }
+}

@@ -1,0 +1,39 @@
+<div class="policy-cards">
+    @foreach (var policy in Policies.OrderByDescending(p => p.IsEnforced).ThenBy(p => p.Kind).ThenBy(p => p.Policy.TypeName))
+    {
+        var description = PolicyDescriber.Describe(policy, id => PipelineNames.GetValueOrDefault(id));
+        <div class="policy-card @(policy.IsEnabled ? "" : "inactive")">
+            <h4>@description.Title</h4>
+            <div>
+                @if (!policy.IsEnabled)
+                {
+                    <span class="tag tag-off">disabled</span>
+                }
+                else if (policy.Policy.IsBlocking)
+                {
+                    <span class="tag tag-on">required</span>
+                }
+                else
+                {
+                    <span class="tag tag-optional">optional</span>
+                }
+                <span class="tag">@(policy.Source == PolicySource.Project ? "project-wide" : "this repo")</span>
+            </div>
+            <div class="subtle small" style="margin-top:.25rem">@description.ScopeText</div>
+            @if (description.Details.Count > 0)
+            {
+                <ul class="small">
+                    @foreach (var line in description.Details)
+                    {
+                        <li>@line</li>
+                    }
+                </ul>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<EffectivePolicy> Policies { get; set; } = [];
+    [Parameter] public IReadOnlyDictionary<long, string> PipelineNames { get; set; } = new Dictionary<long, string>();
+}

@@ -1,0 +1,24 @@
+@* Shows a failure in plain words. Azure DevOps errors already carry a user-facing message. *@
+@if (Error is not null)
+{
+    <FluentMessageBar Intent="MessageIntent.Error" AllowDismiss="false" Title="@Title">
+        @Message
+        @if (Error is AdoConfigurationException or AdoApiException { StatusCode: System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden })
+        {
+            <text> </text><a href="">Check the Status page.</a>
+        }
+    </FluentMessageBar>
+}
+
+@code {
+    [Parameter] public Exception? Error { get; set; }
+    [Parameter] public string Title { get; set; } = "Couldn't load from Azure DevOps";
+
+    private string Message => Error switch
+    {
+        AdoApiException ado => ado.Message,
+        ReadOnlyViolationException ro => ro.Message,
+        null => "",
+        var other => $"Unexpected error: {other.Message}",
+    };
+}

@@ -1,0 +1,57 @@
+@* Bar per run (oldest to newest), coloured by result, with a dashed line at the median successful duration. *@
+@if (_bars.Count > 0)
+{
+    <svg class="chart" viewBox="0 0 @ViewWidth @ViewHeight" role="img" aria-label="Run durations">
+        <line class="gridline" x1="@Left" x2="@ViewWidth" y1="@Top" y2="@Top" />
+        <text x="@(Left - 6)" y="@(Top + 4)" text-anchor="end">@DisplayFormat.Duration(TimeSpan.FromSeconds(_max))</text>
+        <line class="gridline" x1="@Left" x2="@ViewWidth" y1="@Bottom" y2="@Bottom" />
+        <text x="@(Left - 6)" y="@(Bottom + 4)" text-anchor="end">0</text>
+        @foreach (var bar in _bars)
+        {
+            <a href="@AppRoutes.Run(bar.Run.Project, bar.Run.Id)">
+                <rect class="bar-@ResultCss.For(bar.Run.Result)" x="@F(bar.X)" y="@F(bar.Y)" width="@F(bar.Width)" height="@F(bar.Height)" rx="2">
+                    <title>#@bar.Run.BuildNumber · @bar.Run.Result · @DisplayFormat.Duration(bar.Run.Duration) · @bar.Run.BranchName · @DisplayFormat.DateTime(bar.Run.QueueTime)</title>
+                </rect>
+            </a>
+        }
+        @if (Median is { } median && median.TotalSeconds <= _max)
+        {
+            <line class="median" x1="@Left" x2="@ViewWidth" y1="@F(MedianY(median))" y2="@F(MedianY(median))" />
+        }
+    </svg>
+}
+
+@code {
+    private const int ViewWidth = 900;
+    private const int ViewHeight = 180;
+    private const int Left = 50;
+    private const int Top = 10;
+    private const int Bottom = 170;
+
+    /// <summary>Runs in any order; only completed runs with a duration are drawn.</summary>
+    [Parameter, EditorRequired] public IReadOnlyList<PipelineRun> Runs { get; set; } = [];
+    [Parameter] public TimeSpan? Median { get; set; }
+
+    private sealed record Bar(PipelineRun Run, double X, double Y, double Width, double Height);
+    private List<Bar> _bars = [];
+    private double _max;
+
+    protected override void OnParametersSet()
+    {
+        var runs = Runs.Where(r => r.Duration is not null).OrderBy(r => r.QueueTime).ToList();
+        _bars = [];
+        if (runs.Count == 0) return;
+        _max = Math.Max(1, runs.Max(r => r.Duration!.Value.TotalSeconds));
+        var slot = (ViewWidth - Left) / (double)runs.Count;
+        var width = Math.Max(2, Math.Min(40, slot * 0.7));
+        for (var i = 0; i < runs.Count; i++)
+        {
+            var h = Math.Max(1, runs[i].Duration!.Value.TotalSeconds / _max * (Bottom - Top));
+            _bars.Add(new Bar(runs[i], Left + i * slot + (slot - width) / 2, Bottom - h, width, h));
+        }
+    }
+
+    private double MedianY(TimeSpan median) => Bottom - median.TotalSeconds / _max * (Bottom - Top);
+
+    private static string F(double value) => value.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+}

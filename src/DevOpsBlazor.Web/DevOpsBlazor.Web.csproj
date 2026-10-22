@@ -1,0 +1,24 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\DevOpsBlazor.Core\DevOpsBlazor.Core.csproj" />
+    <ProjectReference Include="..\DevOpsBlazor.AzureDevOps\DevOpsBlazor.AzureDevOps.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Update="compliance-baseline.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.FluentUI.AspNetCore.Components" Version="4.14.5" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <BlazorDisableThrowNavigationException>true</BlazorDisableThrowNavigationException>
+    <UserSecretsId>13a34c29-090d-4362-91e7-08d73ada11ac</UserSecretsId>
+  </PropertyGroup>
+
+</Project>

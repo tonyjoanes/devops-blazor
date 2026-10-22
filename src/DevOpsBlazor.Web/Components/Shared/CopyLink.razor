@@ -1,0 +1,19 @@
+@inject IJSRuntime JS
+
+<FluentButton Appearance="Appearance.Lightweight" OnClick="CopyAsync" Title="@($"Copy link: {Url}")">@(_copied ? "Copied" : Text)</FluentButton>
+
+@code {
+    [Parameter, EditorRequired] public string Url { get; set; } = "";
+    [Parameter] public string Text { get; set; } = "Copy link";
+
+    private bool _copied;
+
+    private async Task CopyAsync()
+    {
+        await JS.InvokeVoidAsync("devopsBlazor.copy", Url);
+        _copied = true;
+        StateHasChanged();
+        await Task.Delay(1500);
+        _copied = false;
+    }
+}

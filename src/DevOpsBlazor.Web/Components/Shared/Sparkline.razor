@@ -1,0 +1,27 @@
+@* Duration of completed runs, oldest to newest. Hidden when there's too little data to show a trend. *@
+@if (_points is not null)
+{
+    <svg class="spark" width="@Width" height="@Height" viewBox="0 0 @Width @Height" aria-hidden="true">
+        <polyline points="@_points" />
+    </svg>
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<PipelineRun> Runs { get; set; } = [];
+    [Parameter] public int Width { get; set; } = 80;
+    [Parameter] public int Height { get; set; } = 20;
+
+    private string? _points;
+
+    protected override void OnParametersSet()
+    {
+        var values = Runs.Where(r => r.Duration is not null).OrderBy(r => r.QueueTime).Select(r => r.Duration!.Value.TotalSeconds).ToList();
+        if (values.Count < 3) { _points = null; return; }
+        var max = values.Max();
+        var min = values.Min();
+        var range = Math.Max(1, max - min);
+        var step = (Width - 2) / (double)(values.Count - 1);
+        _points = string.Join(" ", values.Select((v, i) =>
+            FormattableString.Invariant($"{1 + i * step:0.#},{Height - 2 - (v - min) / range * (Height - 4):0.#}")));
+    }
+}

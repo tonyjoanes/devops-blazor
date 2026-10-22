@@ -1,0 +1,17 @@
+<span class="label label-@Label.Severity" title="@Label.Evidence">@Icon @Label.Title</span>
+
+@code {
+    [Parameter, EditorRequired] public ProblemLabel Label { get; set; } = default!;
+
+    private string Icon => Label.Kind switch
+    {
+        LabelKind.Broken => "●",
+        LabelKind.Flaky => "≈",
+        LabelKind.Slow or LabelKind.GettingSlower => "◷",
+        LabelKind.LongQueue => "⧗",
+        LabelKind.Retried => "↻",
+        LabelKind.TimedOut => "⏱",
+        LabelKind.Stale => "◌",
+        _ => "",
+    };
+}

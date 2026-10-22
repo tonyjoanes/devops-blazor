@@ -1,0 +1,62 @@
+@inherits LayoutComponentBase
+@inject IOptionsMonitor<AzureDevOpsOptions> Options
+@inject AdoCache Cache
+@inject NavigationManager Navigation
+@using DevOpsBlazor.AzureDevOps.Http
+@using Microsoft.Extensions.Options
+
+<FluentDesignTheme Mode="DesignThemeModes.System" />
+
+<div class="app">
+    <header class="app-header">
+        <a class="brand" href="">DevOps Blazor</a>
+        <nav class="app-nav">
+            <NavLink href="pipelines">Pipelines</NavLink>
+            <NavLink href="compliance">Compliance</NavLink>
+            <NavLink href="" Match="NavLinkMatch.All">Status</NavLink>
+        </nav>
+        <span class="spacer"></span>
+        <span class="org" title="Azure DevOps organisation">@OrganizationName</span>
+        <FluentButton Appearance="Appearance.Outline" OnClick="Refresh" Title="Clear cached Azure DevOps data and reload">Refresh</FluentButton>
+    </header>
+
+    @if (Banner is { } banner)
+    {
+        <div class="banner banner-@banner.Kind">@banner.Text <a href="">See Status</a></div>
+    }
+
+    <main class="app-main">
+        @Body
+    </main>
+</div>
+
+<div id="blazor-error-ui" data-nosnippet>
+    An unhandled error has occurred.
+    <a href="." class="reload">Reload</a>
+    <span class="dismiss">🗙</span>
+</div>
+
+@code {
+    private string OrganizationName =>
+        Options.CurrentValue.Organization?.TrimEnd('/').Split('/').LastOrDefault() ?? "not configured";
+
+    private (string Kind, string Text)? Banner
+    {
+        get
+        {
+            var o = Options.CurrentValue;
+            if (!o.IsConfigured) return ("error", "Azure DevOps isn't configured yet: set the organisation and PAT.");
+            if (o.PatExpiresOn is not { } expires) return null;
+            var days = expires.DayNumber - DateOnly.FromDateTime(DateTime.Now).DayNumber;
+            if (days < 0) return ("error", $"Your PAT expired on {expires:d MMM yyyy}.");
+            if (days <= 7) return ("warning", $"Your PAT expires in {days} day{(days == 1 ? "" : "s")} ({expires:d MMM yyyy}).");
+            return null;
+        }
+    }
+
+    private void Refresh()
+    {
+        Cache.Clear();
+        Navigation.Refresh(forceReload: true);
+    }
+}

@@ -1,0 +1,288 @@
+@page "/pipelines/{Project}/{DefinitionId:int}"
+@implements IDisposable
+@inject PipelineService Pipelines
+@inject AdoLinks Links
+@inject NavigationManager Navigation
+
+<PageTitle>@(_definition?.Name ?? "Pipeline") · DevOps Blazor</PageTitle>
+
+<p class="small"><a href="@AppRoutes.Pipelines(Project)">← Pipelines in @Project</a></p>
+
+<ErrorPanel Error="_error" />
+
+@if (_definition is null && _error is null)
+{
+    <Loading />
+}
+else if (_definition is not null)
+{
+    <div class="page-header">
+        <div>
+            <h1>@_definition.Name</h1>
+            <div class="subtle">
+                @Project@(string.IsNullOrEmpty(_definition.Folder) ? "" : " · " + _definition.Folder.Replace('\\', '/'))
+                · @(_definition.Process == PipelineProcess.Designer ? "classic" : "YAML")
+                @if (_definition.DefaultBranch is { } b) { <text> · default branch </text><span class="mono">@BranchNames.Short(b)</span> }
+            </div>
+        </div>
+        <div class="links">
+            <OpenInAdo Href="@Links.Pipeline(Project, DefinitionId)" />
+        </div>
+    </div>
+
+    <div class="toolbar">
+        <FluentSelect TOption="int" Label="Runs" Items="@Counts" Value="@Count.ToString()" ValueChanged="@(v => Go(count: int.Parse(v!)))" Width="100px" />
+        <FluentSelect TOption="BranchOption" Label="Branch" Items="@BranchOptions()" OptionText="@(o => o.Text)" OptionValue="@(o => o.Value)"
+                      Value="@SelectedBranch" ValueChanged="@(v => Go(branch: v ?? ""))" Width="240px" />
+        @if (_analysing)
+        {
+            <span class="subtle small"><FluentProgressRing Width="14px" /> Checking run timelines for retries, timeouts and warnings…</span>
+        }
+    </div>
+
+    @if (_health is null)
+    {
+        <Loading />
+    }
+    else
+    {
+        <div class="stats">
+            <div class="stat"><div class="value">@DisplayFormat.Percent(_health.PassRate)</div><div class="label">pass rate (@_health.Runs.Count runs)</div></div>
+            <div class="stat"><div class="value">@DisplayFormat.Duration(_health.MedianDuration)</div><div class="label">median successful duration</div></div>
+            <div class="stat"><div class="value">@DisplayFormat.Duration(MedianQueue)</div><div class="label">median queue wait</div></div>
+            <div class="stat"><div class="value">@DisplayFormat.Relative(_health.LatestRun?.When, _now)</div><div class="label">last run</div></div>
+        </div>
+
+        @if (PipelineLabels.Count > 0)
+        {
+            <div class="card">
+                <ProblemLabels Labels="@PipelineLabels" />
+                <ul class="evidence">
+                    @foreach (var label in PipelineLabels)
+                    {
+                        <li><strong>@label.Title:</strong> @label.Evidence</li>
+                    }
+                </ul>
+            </div>
+        }
+
+        <h2>Duration</h2>
+        <div class="card">
+            <DurationChart Runs="@_health.Runs" Median="@_health.MedianDuration" />
+            <div class="legend subtle" style="margin-top:.5rem">
+                <span><span class="dot dot-succeeded"></span> succeeded</span>
+                <span><span class="dot dot-failed"></span> failed</span>
+                <span><span class="dot dot-partiallySucceeded"></span> partially succeeded</span>
+                <span>– – median successful duration (@DisplayFormat.Duration(_health.MedianDuration))</span>
+                <span>Click a bar to open the run.</span>
+            </div>
+        </div>
+
+        <h2>Runs</h2>
+        <FluentDataGrid Items="@_health.Runs.AsQueryable()" TGridItem="PipelineRun" ShowHover="true"
+                        GridTemplateColumns="minmax(150px, 1fr) 120px minmax(140px, 1fr) minmax(130px, 1fr) 115px 100px minmax(150px, 1.5fr) 190px">
+            <TemplateColumn Title="Run" SortBy="@_byQueued" IsDefaultSortColumn="true">
+                <div>
+                    <a href="@AppRoutes.Run(Project, context.Id)"><strong>#@context.BuildNumber</strong></a>
+                    <div class="subtle small" title="@DisplayFormat.DateTime(context.QueueTime)">@DisplayFormat.Relative(context.When, _now)</div>
+                </div>
+            </TemplateColumn>
+            <TemplateColumn Title="Result">
+                <RunResultBadge Run="context" />
+            </TemplateColumn>
+            <TemplateColumn Title="Branch / commit">
+                <div>
+                    <span class="mono small">@context.BranchName</span>
+                    @if (context.ShortCommit is { } sha)
+                    {
+                        <div class="small">
+                            @if (Links.CommitFor(context) is { } commitUrl)
+                            {
+                                <a class="mono" href="@commitUrl" target="_blank" rel="noopener">@sha</a>
+                            }
+                            else
+                            {
+                                <span class="mono">@sha</span>
+                            }
+                        </div>
+                    }
+                </div>
+            </TemplateColumn>
+            <TemplateColumn Title="Trigger">
+                <div class="small">@Reason(context.Reason)<div class="subtle">@context.RequestedFor</div></div>
+            </TemplateColumn>
+            <TemplateColumn Title="Queued for" SortBy="@_byQueue" Align="Align.End">
+                <span class="nowrap">@DisplayFormat.Duration(context.QueueWait)</span>
+            </TemplateColumn>
+            <TemplateColumn Title="Duration" SortBy="@_byDuration" Align="Align.End">
+                <span class="nowrap">@DisplayFormat.Duration(context.Duration)</span>
+            </TemplateColumn>
+            <TemplateColumn Title="Problems">
+                <ProblemLabels Labels="@RunLabels(context)" />
+            </TemplateColumn>
+            <TemplateColumn Title="Azure DevOps">
+                <span class="labels">
+                    <OpenInAdo Href="@Links.Run(Project, context.Id)" Title="Open the run summary in Azure DevOps">Run</OpenInAdo>
+                    @if (FirstFailureUrl(context) is { } failureUrl)
+                    {
+                        <OpenInAdo Href="@failureUrl" Title="Open the log of the first failed task">First failure</OpenInAdo>
+                    }
+                    else
+                    {
+                        <OpenInAdo Href="@Links.Logs(Project, context.Id)" Title="Open the run's logs">Logs</OpenInAdo>
+                    }
+                </span>
+            </TemplateColumn>
+        </FluentDataGrid>
+    }
+}
+
+@code {
+    [Parameter] public string Project { get; set; } = "";
+    [Parameter] public int DefinitionId { get; set; }
+
+    /// <summary>Number of runs to show.</summary>
+    [SupplyParameterFromQuery] public int? Runs { get; set; }
+
+    /// <summary>"" for all branches, otherwise a branch name. Defaults to the pipeline's default branch.</summary>
+    [SupplyParameterFromQuery] public string? Branch { get; set; }
+
+    private static readonly int[] Counts = [10, 25, 50];
+    private int Count => Runs is { } r && Counts.Contains(r) ? r : 25;
+
+    private PipelineDefinition? _definition;
+    private PipelineHealth? _health;
+    private IReadOnlyDictionary<int, TimelineInsight> _insights = new Dictionary<int, TimelineInsight>();
+    private ProblemLabel? _warningsTrend;
+    private Exception? _error;
+    private bool _analysing;
+    private DateTimeOffset _now;
+    private CancellationTokenSource _cts = new();
+
+    private readonly GridSort<PipelineRun> _byQueued = GridSort<PipelineRun>.ByDescending(r => r.QueueTime);
+    private readonly GridSort<PipelineRun> _byQueue = GridSort<PipelineRun>.ByDescending(r => r.QueueWait ?? TimeSpan.Zero);
+    private readonly GridSort<PipelineRun> _byDuration = GridSort<PipelineRun>.ByDescending(r => r.Duration ?? TimeSpan.Zero);
+
+    private sealed record BranchOption(string Value, string Text);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _cts.Cancel();
+        _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
+        _error = null;
+        _health = null;
+        _insights = new Dictionary<int, TimelineInsight>();
+        _warningsTrend = null;
+        _now = DateTimeOffset.UtcNow;
+
+        try
+        {
+            if (_definition is null || _definition.Id != DefinitionId || _definition.Project != Project)
+            {
+                _definition = await Pipelines.GetDefinitionAsync(Project, DefinitionId, ct);
+            }
+            if (_definition is null)
+            {
+                _error = new AdoApiException($"Pipeline {DefinitionId} wasn't found in {Project}.");
+                return;
+            }
+
+            var branch = Branch ?? _definition.DefaultBranch;
+            _health = await Pipelines.GetPipelineAsync(_definition, Count, string.IsNullOrEmpty(branch) ? null : branch, ct);
+        }
+        catch (Exception ex) when (ex is AdoApiException or ReadOnlyViolationException)
+        {
+            _error = ex;
+            return;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return;
+        }
+
+        _ = AnalyseTimelinesAsync(_health, ct);
+    }
+
+    /// <summary>Fills in the timeline-based labels after the table is already on screen.</summary>
+    private async Task AnalyseTimelinesAsync(PipelineHealth health, CancellationToken ct)
+    {
+        _analysing = true;
+        StateHasChanged();
+        try
+        {
+            var insights = await Pipelines.GetTimelineInsightsAsync(Project, health.Runs, ct);
+            if (ct.IsCancellationRequested) return;
+            _insights = insights;
+            _warningsTrend = PipelineService.WarningsTrend(health.Runs, insights);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        catch (Exception ex) when (ex is AdoApiException)
+        {
+            // Timeline labels are extras; the page is still useful without them.
+        }
+        _analysing = false;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private IReadOnlyList<ProblemLabel> PipelineLabels =>
+        _health is null ? [] : _warningsTrend is null ? _health.Labels : [.. _health.Labels, _warningsTrend];
+
+    private IReadOnlyList<ProblemLabel> RunLabels(PipelineRun run)
+    {
+        var labels = _health?.LabelsFor(run) ?? [];
+        return _insights.TryGetValue(run.Id, out var insight) && insight.Labels.Count > 0 ? [.. labels, .. insight.Labels] : labels;
+    }
+
+    private string? FirstFailureUrl(PipelineRun run) =>
+        _insights.TryGetValue(run.Id, out var insight) && (insight.FirstFailedTask ?? insight.FirstFailedJob) is not null
+            ? Links.Logs(Project, run.Id, insight.FirstFailedJob?.Id, insight.FirstFailedTask?.Id)
+            : null;
+
+    private TimeSpan? MedianQueue => Stats.Median(_health?.Runs.Where(r => r.QueueWait is not null).Select(r => r.QueueWait!.Value) ?? []);
+
+    private IReadOnlyList<BranchOption> BranchOptions()
+    {
+        var options = new List<BranchOption> { new("", "All branches") };
+        if (_definition?.DefaultBranch is { } d) options.Add(new(BranchNames.Short(d), $"{BranchNames.Short(d)} (default)"));
+        var seen = _health?.Runs.Select(r => r.SourceBranch).Where(b => b.StartsWith("refs/heads/", StringComparison.OrdinalIgnoreCase)) ?? [];
+        foreach (var b in seen.Select(BranchNames.Short).Distinct(StringComparer.OrdinalIgnoreCase).Order())
+        {
+            if (options.All(o => !o.Value.Equals(b, StringComparison.OrdinalIgnoreCase))) options.Add(new(b, b));
+        }
+        if (!string.IsNullOrEmpty(Branch) && options.All(o => !o.Value.Equals(Branch, StringComparison.OrdinalIgnoreCase)))
+        {
+            options.Add(new(Branch, Branch));
+        }
+        return options;
+    }
+
+    private string? SelectedBranch => Branch ?? (_definition?.DefaultBranch is { } d ? BranchNames.Short(d) : "");
+
+    private void Go(int? count = null, string? branch = null)
+    {
+        var url = Navigation.GetUriWithQueryParameters(new Dictionary<string, object?>
+        {
+            ["runs"] = count ?? Count,
+            ["branch"] = branch ?? SelectedBranch,
+        });
+        Navigation.NavigateTo(url);
+    }
+
+    private static string Reason(string reason) => reason switch
+    {
+        "individualCI" or "batchedCI" => "CI push",
+        "pullRequest" => "Pull request",
+        "manual" => "Manual",
+        "schedule" => "Scheduled",
+        "resourceTrigger" => "Pipeline resource",
+        "buildCompletion" => "After another pipeline",
+        "" => "–",
+        _ => reason,
+    };
+
+    public void Dispose() => _cts.Cancel();
+}

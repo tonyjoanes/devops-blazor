@@ -1,0 +1,18 @@
+{
+  "count": 2,
+  "value": [
+    {
+      "id": 1030, "buildNumber": "2026.10.1030", "status": "completed", "result": "partiallySucceeded",
+      "queueTime": "2026-10-22T08:59:00.000Z", "startTime": "2026-10-22T09:00:00.000Z", "finishTime": "2026-10-22T09:03:36.000Z",
+      "sourceBranch": "refs/heads/main", "sourceVersion": "1214590e1d2c", "reason": "individualCI",
+      "requestedFor": { "displayName": "Alex Kim" }, "definition": { "id": 1, "name": "api-ci" },
+      "project": { "name": "Platform" }, "repository": { "id": "r", "name": "api", "type": "TfsGit" }
+    },
+    {
+      "id": 1031, "buildNumber": "2026.10.1031", "status": "notStarted", "result": null,
+      "queueTime": "2026-10-22T10:00:00.000Z", "startTime": null, "finishTime": "0001-01-01T00:00:00",
+      "sourceBranch": "refs/pull/42/merge", "reason": "pullRequest", "definition": { "id": 1, "name": "api-ci" },
+      "somethingNew": { "ignored": true }
+    }
+  ]
+}

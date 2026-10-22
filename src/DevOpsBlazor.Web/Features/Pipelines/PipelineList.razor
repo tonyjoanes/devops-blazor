@@ -1,0 +1,159 @@
+@page "/pipelines"
+@inject PipelineService Pipelines
+@inject AdoLinks Links
+@inject NavigationManager Navigation
+
+<PageTitle>Pipelines · DevOps Blazor</PageTitle>
+
+<div class="page-header">
+    <div>
+        <h1>Pipelines</h1>
+        <div class="subtle">The last @RunsShown runs of each pipeline, with likely problems labelled. Hover a label to see why.</div>
+    </div>
+</div>
+
+<div class="toolbar">
+    <ProjectPicker Value="@Project" ValueChanged="OnProjectChanged" OnError="e => _error = e" />
+    <FluentSearch @bind-Value="_filter" @bind-Value:after="StateHasChanged" Immediate="true" Placeholder="Filter by name or folder" Width="260px" />
+    <FluentCheckbox @bind-Value="_problemsOnly" Label="Only pipelines with problems" />
+    <FluentCheckbox @bind-Value="_defaultBranchOnly" Label="Default branch runs only" />
+    <FluentCheckbox @bind-Value="_hideDisabled" Label="Hide disabled" />
+</div>
+
+<ErrorPanel Error="_error" />
+
+@if (_loading)
+{
+    <Loading />
+}
+else if (_pipelines is not null)
+{
+    var rows = Filtered().ToList();
+    <div class="stats">
+        <div class="stat"><div class="value">@rows.Count</div><div class="label">pipelines shown</div></div>
+        <div class="stat"><div class="value" style="color:var(--fail)">@rows.Count(p => p.Labels.Any(l => l.Kind == LabelKind.Broken))</div><div class="label">broken on default branch</div></div>
+        <div class="stat"><div class="value" style="color:var(--warn)">@rows.Count(p => p.Labels.Any(l => l.Kind == LabelKind.Flaky))</div><div class="label">flaky</div></div>
+        <div class="stat"><div class="value">@rows.Count(p => p.Labels.Any(l => l.Kind == LabelKind.Stale))</div><div class="label">stale</div></div>
+    </div>
+
+    @if (rows.Count == 0)
+    {
+        <p class="subtle">No pipelines match.</p>
+    }
+    else
+    {
+        <FluentDataGrid Items="@rows.AsQueryable()" TGridItem="PipelineHealth" ShowHover="true"
+                        GridTemplateColumns="minmax(200px, 2fr) 280px 130px 115px 190px minmax(170px, 1.5fr) 70px">
+            <TemplateColumn Title="Pipeline" SortBy="@_byName" IsDefaultSortColumn="false">
+                <div>
+                    <a href="@AppRoutes.Pipeline(context.Definition.Project, context.Definition.Id)"><strong>@context.Definition.Name</strong></a>
+                    <div class="subtle small">@Location(context.Definition)</div>
+                </div>
+            </TemplateColumn>
+            <TemplateColumn Title="Recent runs">
+                <RunStrip Runs="@Runs(context)" Max="RunsShown" />
+            </TemplateColumn>
+            <TemplateColumn Title="Last run" SortBy="@_byLastRun">
+                @if (Runs(context).FirstOrDefault() is { } last)
+                {
+                    <div>
+                        <RunResultBadge Run="last" />
+                        <div class="subtle small" title="@DisplayFormat.DateTime(last.QueueTime)">@DisplayFormat.Relative(last.When, _now)</div>
+                    </div>
+                }
+                else
+                {
+                    <span class="subtle">no runs</span>
+                }
+            </TemplateColumn>
+            <TemplateColumn Title="Pass rate" SortBy="@_byPassRate" Align="Align.End">
+                @DisplayFormat.Percent(PassRate(context))
+            </TemplateColumn>
+            <TemplateColumn Title="Median duration" SortBy="@_byMedian">
+                <span class="nowrap">@DisplayFormat.Duration(context.MedianDuration) <Sparkline Runs="@Runs(context)" /></span>
+            </TemplateColumn>
+            <TemplateColumn Title="Problems" SortBy="@_bySeverity" IsDefaultSortColumn="true">
+                <ProblemLabels Labels="@context.Labels" />
+            </TemplateColumn>
+            <TemplateColumn Title="">
+                <OpenInAdo Href="@Links.Pipeline(context.Definition.Project, context.Definition.Id)" Title="Open this pipeline in Azure DevOps">ADO</OpenInAdo>
+            </TemplateColumn>
+        </FluentDataGrid>
+    }
+}
+
+@code {
+    [SupplyParameterFromQuery] public string? Project { get; set; }
+
+    private IReadOnlyList<PipelineHealth>? _pipelines;
+    private Exception? _error;
+    private bool _loading;
+    private string? _filter;
+    private bool _problemsOnly;
+    private bool _defaultBranchOnly;
+    private bool _hideDisabled = true;
+    private DateTimeOffset _now = DateTimeOffset.UtcNow;
+    private const int RunsShown = 20;
+
+    private readonly GridSort<PipelineHealth> _byName = GridSort<PipelineHealth>.ByAscending(p => p.Definition.Name);
+    private readonly GridSort<PipelineHealth> _byLastRun = GridSort<PipelineHealth>.ByDescending(p => p.LatestRun == null ? DateTimeOffset.MinValue : p.LatestRun.QueueTime);
+    private readonly GridSort<PipelineHealth> _byPassRate = GridSort<PipelineHealth>.ByAscending(p => p.PassRate ?? 2);
+    private readonly GridSort<PipelineHealth> _byMedian = GridSort<PipelineHealth>.ByDescending(p => p.MedianDuration ?? TimeSpan.Zero);
+    private readonly GridSort<PipelineHealth> _bySeverity = GridSort<PipelineHealth>
+        .ByAscending(p => p.WorstSeverity)
+        .ThenDescending(p => p.Labels.Count)
+        .ThenAscending(p => p.Definition.Name);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _loading = true;
+        _error = null;
+        try
+        {
+            _now = DateTimeOffset.UtcNow;
+            _pipelines = await Pipelines.GetOverviewAsync(Project);
+        }
+        catch (Exception ex) when (ex is AdoApiException or ReadOnlyViolationException)
+        {
+            _error = ex;
+            _pipelines = null;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private IEnumerable<PipelineHealth> Filtered() =>
+        (_pipelines ?? []).Where(p =>
+            (!_hideDisabled || !p.Definition.IsDisabled)
+            && (!_problemsOnly || p.Labels.Any(l => l.Severity != LabelSeverity.Info))
+            && (string.IsNullOrWhiteSpace(_filter)
+                || p.Definition.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase)
+                || p.Definition.Folder.Contains(_filter, StringComparison.OrdinalIgnoreCase)));
+
+    private IReadOnlyList<PipelineRun> Runs(PipelineHealth p) =>
+        _defaultBranchOnly && p.Definition.DefaultBranch is { } branch
+            ? p.Runs.Where(r => string.Equals(r.SourceBranch, branch, StringComparison.OrdinalIgnoreCase)).ToList()
+            : p.Runs;
+
+    private double? PassRate(PipelineHealth p)
+    {
+        if (!_defaultBranchOnly) return p.PassRate;
+        var judged = Runs(p).Where(r => r.IsCompleted && r.Result != RunResult.Canceled).ToList();
+        return judged.Count == 0 ? null : judged.Count(r => r.Result == RunResult.Succeeded) / (double)judged.Count;
+    }
+
+    private string Location(PipelineDefinition d)
+    {
+        var parts = new List<string>();
+        if (Project is null or ProjectScope.AllProjects) parts.Add(d.Project);
+        if (d.Folder.Length > 0) parts.Add(d.Folder.Replace('\\', '/'));
+        if (d.Process == PipelineProcess.Designer) parts.Add("classic");
+        if (d.DefaultBranch is { } b) parts.Add(BranchNames.Short(b));
+        return string.Join(" · ", parts);
+    }
+
+    private void OnProjectChanged(string project) =>
+        Navigation.NavigateTo(AppRoutes.Pipelines(project == ProjectScope.AllProjects ? null : project));
+}

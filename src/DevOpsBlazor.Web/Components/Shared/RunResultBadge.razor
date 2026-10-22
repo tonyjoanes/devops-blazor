@@ -1,0 +1,26 @@
+@* The result of a run, or its status while it hasn't finished. *@
+<span class="result result-@ResultCss.For(Run)" title="@Title">@Text</span>
+
+@code {
+    [Parameter, EditorRequired] public PipelineRun Run { get; set; } = default!;
+
+
+    private string Text => Run.IsCompleted
+        ? Run.Result switch
+        {
+            RunResult.Succeeded => "✓ Succeeded",
+            RunResult.Failed => "✗ Failed",
+            RunResult.PartiallySucceeded => "! Partial",
+            RunResult.Canceled => "⊘ Cancelled",
+            _ => "Completed",
+        }
+        : Run.Status switch
+        {
+            RunStatus.NotStarted => "Queued",
+            RunStatus.Cancelling => "Cancelling",
+            RunStatus.Postponed => "Postponed",
+            _ => "Running",
+        };
+
+    private string Title => Run.IsCompleted ? $"Finished {DisplayFormat.DateTime(Run.FinishTime)}" : $"Queued {DisplayFormat.DateTime(Run.QueueTime)}";
+}

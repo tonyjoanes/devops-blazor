@@ -7,6 +7,13 @@ A personal, **read-only** Blazor app that runs locally next to Azure DevOps (ADO
 
 It's built in small, shippable slices so new features are cheap to add.
 
+> **Status (Oct 2026):** Phases 0–4 are built. See the README for setup.
+> Where the build differs from this plan:
+> - Domain models live in `DevOpsBlazor.Core`, so the logic and its tests don't depend on the HTTP client.
+> - Caching uses a dedicated `IMemoryCache`, so **Refresh** can clear it.
+> - Charts are small inline SVG components rather than ApexCharts.
+> - Policy type names come from each policy's inline `type.displayName`, so `policy/types` isn't called.
+
 ---
 
 ## 1. Scope

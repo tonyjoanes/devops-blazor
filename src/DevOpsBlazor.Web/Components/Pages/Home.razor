@@ -1,0 +1,72 @@
+@page "/"
+@inject HealthService Health
+@inject IOptionsMonitor<AzureDevOpsOptions> Options
+@using Microsoft.Extensions.Options
+
+<PageTitle>Status · DevOps Blazor</PageTitle>
+
+<h1>Status</h1>
+<p class="subtle">Checks the connection to Azure DevOps and that the PAT has each read-only scope the app needs.</p>
+
+@if (!Options.CurrentValue.IsConfigured)
+{
+    <div class="card">
+        <h2 style="margin-top:0">Set up</h2>
+        <p>Create a PAT in Azure DevOps (<em>User settings → Personal access tokens</em>) with these scopes only:
+            <strong>Code (Read)</strong>, <strong>Build (Read)</strong> and <strong>Project and Team (Read)</strong>.</p>
+        <p>Then, from the repository root:</p>
+        <code class="block">dotnet user-secrets set "AzureDevOps:Organization" "https://dev.azure.com/your-org" --project src/DevOpsBlazor.Web
+dotnet user-secrets set "AzureDevOps:Pat" "&lt;your PAT&gt;" --project src/DevOpsBlazor.Web
+dotnet user-secrets set "AzureDevOps:PatExpiresOn" "2027-01-31" --project src/DevOpsBlazor.Web</code>
+        <p class="subtle">The organisation can go in appsettings.json instead. Restart the app after setting secrets.</p>
+    </div>
+}
+else
+{
+    <div class="stats">
+        <div class="stat"><div class="label">Organisation</div><div class="value small">@Options.CurrentValue.Organization</div></div>
+        <div class="stat"><div class="label">Signed in as</div><div class="value small">@(_report?.User ?? "…")</div></div>
+        <div class="stat"><div class="label">PAT expires</div><div class="value small">@(Options.CurrentValue.PatExpiresOn?.ToString("d MMM yyyy") ?? "not recorded")</div></div>
+        <div class="stat"><div class="label">Projects in scope</div><div class="value small">@(_report is null ? "…" : _report.Projects.Count)</div></div>
+    </div>
+
+    @if (_report is null)
+    {
+        <Loading Text="Checking the connection…" />
+    }
+    else if (_report.ConnectionError is { } error)
+    {
+        <FluentMessageBar Intent="MessageIntent.Error" AllowDismiss="false" Title="Couldn't connect">@error</FluentMessageBar>
+    }
+    else
+    {
+        <h2>Scope checks</h2>
+        <table class="grid">
+            <thead><tr><th></th><th>Scope</th><th>Check</th><th>Result</th></tr></thead>
+            <tbody>
+                @foreach (var check in _report.Checks)
+                {
+                    <tr>
+                        <td class="@(check.Ok ? "check-ok" : "check-fail")">@(check.Ok ? "✓" : "✗")</td>
+                        <td class="nowrap">@check.Scope</td>
+                        <td>@check.What</td>
+                        <td>@check.Detail</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+        @if (Options.CurrentValue.PatExpiresOn is null)
+        {
+            <p class="subtle">Tip: record the PAT's expiry date as <span class="mono">AzureDevOps:PatExpiresOn</span> in user-secrets to get a warning a week before it expires.</p>
+        }
+    }
+}
+
+@code {
+    private HealthReport? _report;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Options.CurrentValue.IsConfigured) _report = await Health.CheckAsync();
+    }
+}

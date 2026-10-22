@@ -1,0 +1,249 @@
+@page "/runs/{Project}/{BuildId:int}"
+@inject IBuildClient Builds
+@inject PipelineService Pipelines
+@inject AdoLinks Links
+@using DevOpsBlazor.AzureDevOps.Clients
+@using Microsoft.Extensions.Options
+@inject IOptionsMonitor<RunLabelOptions> LabelOptions
+
+<PageTitle>Run #@(_run?.BuildNumber ?? BuildId.ToString()) · DevOps Blazor</PageTitle>
+
+@if (_run is not null)
+{
+    <p class="small"><a href="@AppRoutes.Pipeline(Project, _run.DefinitionId)">← @_run.DefinitionName</a></p>
+}
+
+<ErrorPanel Error="_error" />
+
+@if (_run is null && _error is null)
+{
+    <Loading />
+}
+else if (_run is not null)
+{
+    <div class="page-header">
+        <div>
+            <h1>@_run.DefinitionName #@_run.BuildNumber</h1>
+            <div class="toolbar" style="margin:.25rem 0">
+                <RunResultBadge Run="_run" />
+                <span class="mono">@_run.BranchName</span>
+                @if (_run.ShortCommit is { } sha)
+                {
+                    @if (Links.CommitFor(_run) is { } commitUrl)
+                    {
+                        <a class="mono" href="@commitUrl" target="_blank" rel="noopener">@sha</a>
+                    }
+                    else
+                    {
+                        <span class="mono">@sha</span>
+                    }
+                }
+                <span class="subtle">@_run.RequestedFor</span>
+            </div>
+        </div>
+        <div class="links">
+            @if (_firstFailure is { } failure)
+            {
+                <FluentAnchor Href="@failure" Target="_blank" Appearance="Appearance.Accent">Open first failure ↗</FluentAnchor>
+            }
+            <OpenInAdo Href="@Links.Run(Project, BuildId)">Run summary</OpenInAdo>
+            <OpenInAdo Href="@Links.Logs(Project, BuildId)">Logs</OpenInAdo>
+            <a href="@Links.LogsZip(Project, BuildId)" target="_blank" rel="noopener" title="Downloaded straight from Azure DevOps using your browser's sign-in">Download logs (zip) ↓</a>
+            <CopyLink Url="@Links.Run(Project, BuildId)" />
+        </div>
+    </div>
+
+    <div class="stats">
+        <div class="stat"><div class="value">@DisplayFormat.Duration(_run.QueueWait)</div><div class="label">queued for</div></div>
+        <div class="stat"><div class="value">@DisplayFormat.Duration(_run.Duration)</div><div class="label">duration</div></div>
+        <div class="stat"><div class="value small">@DisplayFormat.DateTime(_run.QueueTime)</div><div class="label">queued</div></div>
+        <div class="stat"><div class="value small">@DisplayFormat.DateTime(_run.FinishTime)</div><div class="label">finished</div></div>
+    </div>
+
+    @if (_labels.Count > 0)
+    {
+        <div class="card">
+            <ProblemLabels Labels="@_labels" />
+            <ul class="evidence">
+                @foreach (var label in _labels)
+                {
+                    <li><strong>@label.Title:</strong> @label.Evidence</li>
+                }
+            </ul>
+        </div>
+    }
+
+    @if (_records is null)
+    {
+        <Loading Text="Loading the timeline…" />
+    }
+    else
+    {
+        var errors = TimelineAnalyzer.Errors(_records);
+        @if (errors.Count > 0)
+        {
+            <h2>Errors (@errors.Count)</h2>
+            <ul class="errors">
+                @foreach (var (record, issue) in errors.Take(25))
+                {
+                    <li>
+                        <div class="where">
+                            @record.Name
+                            <span class="small"><OpenInAdo Href="@LogUrl(record)">log</OpenInAdo></span>
+                        </div>
+                        <div class="msg mono small">@issue.Message</div>
+                    </li>
+                }
+            </ul>
+            @if (errors.Count > 25)
+            {
+                <p class="subtle">…and @(errors.Count - 25) more. <OpenInAdo Href="@Links.Logs(Project, BuildId)">Open the logs</OpenInAdo></p>
+            }
+        }
+
+        <h2>Timeline</h2>
+        <div class="card timeline">
+            @if (_tree is null || _tree.Children.Count == 0)
+            {
+                <span class="subtle">No timeline yet.</span>
+            }
+            else
+            {
+                @foreach (var node in _tree.Children)
+                {
+                    @RenderNode(node)
+                }
+            }
+        </div>
+    }
+
+    @if (_changes is { Count: > 0 })
+    {
+        <h2>Changes in this run</h2>
+        <table class="grid">
+            <thead><tr><th>Commit</th><th>Message</th><th>Author</th><th>When</th></tr></thead>
+            <tbody>
+                @foreach (var change in _changes)
+                {
+                    <tr>
+                        <td class="mono small">
+                            @if (change.DisplayUri is { } uri)
+                            {
+                                <a href="@uri" target="_blank" rel="noopener">@ShortId(change.Id)</a>
+                            }
+                            else
+                            {
+                                @ShortId(change.Id)
+                            }
+                        </td>
+                        <td>@FirstLine(change.Message)</td>
+                        <td class="nowrap">@change.Author</td>
+                        <td class="nowrap subtle">@DisplayFormat.Relative(change.Timestamp, DateTimeOffset.UtcNow)</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+}
+
+@code {
+    [Parameter] public string Project { get; set; } = "";
+    [Parameter] public int BuildId { get; set; }
+
+    private PipelineRun? _run;
+    private IReadOnlyList<TimelineRecord>? _records;
+    private TimelineNode? _tree;
+    private IReadOnlyList<RunChange>? _changes;
+    private string? _firstFailure;
+    private Exception? _error;
+    private IReadOnlyList<ProblemLabel> _labels = [];
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _error = null;
+        _run = null;
+        _records = null;
+        _changes = null;
+        _firstFailure = null;
+        _labels = [];
+        try
+        {
+            _run = await Builds.GetRunAsync(Project, BuildId);
+            var runLabels = RunAnalyzer.LabelRun(_run, null, LabelOptions.CurrentValue);
+            StateHasChanged();
+
+            var timeline = Builds.GetTimelineAsync(Project, _run);
+            var changes = Builds.GetChangesAsync(Project, BuildId);
+            _records = await timeline;
+            _tree = TimelineTree.Build(_records);
+            var insight = PipelineService.Insight(_records);
+            _labels = [.. runLabels, .. insight.Labels];
+            if ((insight.FirstFailedTask ?? insight.FirstFailedJob) is not null)
+            {
+                _firstFailure = Links.Logs(Project, BuildId, insight.FirstFailedJob?.Id, insight.FirstFailedTask?.Id);
+            }
+
+            try { _changes = await changes; }
+            catch (AdoApiException) { _changes = []; }
+        }
+        catch (Exception ex) when (ex is AdoApiException or ReadOnlyViolationException)
+        {
+            _error = ex;
+        }
+    }
+
+    private string LogUrl(TimelineRecord record)
+    {
+        var job = _records is null ? null : TimelineAnalyzer.FindJob(_records, record);
+        return Links.Logs(Project, BuildId, job?.Id, record.IsTask ? record.Id : null);
+    }
+
+    private RenderFragment RenderNode(TimelineNode node) => __builder =>
+    {
+        var r = node.Record;
+        if (node.Children.Count == 0)
+        {
+            <div class="leaf">@NodeLine(r)</div>
+        }
+        else
+        {
+            <details open="@(r.IsFailed || r.Result is null || r.Result == RunResult.PartiallySucceeded)">
+                <summary>@NodeLine(r)</summary>
+                @foreach (var child in node.Children)
+                {
+                    @RenderNode(child)
+                }
+            </details>
+        }
+    };
+
+    private RenderFragment NodeLine(TimelineRecord r) => __builder =>
+    {
+        <span class="node">
+            <span class="result result-@(r.Result is null ? "running" : ResultCss.For(r.Result))" title="@(r.Result?.ToString() ?? r.State)">@(r.Result is null ? "…" : ResultCss.Symbol(r.Result))</span>
+            <span class="type">@TypeName(r)</span>
+            <span>@r.Name</span>
+            <span class="subtle small">@DisplayFormat.Duration(r.Duration)</span>
+            @if (r.ErrorCount > 0) { <span class="issue-error small">@r.ErrorCount error@(r.ErrorCount == 1 ? "" : "s")</span> }
+            @if (r.WarningCount > 0) { <span class="small" style="color:var(--warn)">@r.WarningCount warning@(r.WarningCount == 1 ? "" : "s")</span> }
+            @if (r.Attempt > 1) { <span class="label label-Low">attempt @r.Attempt</span> }
+            @if (r.IsJob && r.WorkerName is { } worker) { <span class="subtle small">on @worker</span> }
+            @if (r.IsJob || r.IsTask) { <span class="small"><OpenInAdo Href="@LogUrl(r)">log</OpenInAdo></span> }
+        </span>
+    };
+
+    private static string TypeName(TimelineRecord r) => r.Type switch
+    {
+        "Phase" => "phase",
+        "Checkpoint" => "check",
+        var t => t.ToLowerInvariant(),
+    };
+
+    private static string ShortId(string id) => id.Length > 8 ? id[..8] : id;
+
+    private static string FirstLine(string message)
+    {
+        var i = message.IndexOfAny(['\r', '\n']);
+        return i < 0 ? message : message[..i];
+    }
+}

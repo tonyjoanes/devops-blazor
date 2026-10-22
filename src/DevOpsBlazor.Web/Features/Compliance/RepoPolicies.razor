@@ -1,0 +1,151 @@
+@page "/compliance/{Project}/{RepositoryId:guid}"
+@inject ComplianceService Compliance
+@inject AdoLinks Links
+
+<PageTitle>@(_detail?.Repository.Name ?? "Repository") policies · DevOps Blazor</PageTitle>
+
+<p class="small"><a href="@AppRoutes.Compliance(Project)">← Compliance for @Project</a></p>
+
+@if (_baselineError is { } baselineError)
+{
+    <FluentMessageBar Intent="MessageIntent.Error" AllowDismiss="false" Title="Baseline problem">@baselineError</FluentMessageBar>
+}
+<ErrorPanel Error="_error" />
+
+@if (_loading)
+{
+    <Loading />
+}
+else if (_detail is { } d)
+{
+    var repo = d.Repository;
+    var row = d.Report.Rows[0];
+
+    <div class="page-header">
+        <div>
+            <h1>@repo.Name</h1>
+            <div class="subtle">
+                @repo.Project · default branch <span class="mono">@(repo.DefaultBranch is { } b ? BranchNames.Short(b) : "none")</span>
+                @if (repo.IsDisabled) { <span class="tag tag-off">disabled</span> }
+            </div>
+        </div>
+        <div class="links">
+            <OpenInAdo Href="@Links.Repository(Project, repo.Name)">Repository</OpenInAdo>
+            @if (repo.DefaultBranch is { } defaultBranch)
+            {
+                <OpenInAdo Href="@Links.BranchPolicies(Project, repo.Id, defaultBranch)">Branch policies</OpenInAdo>
+            }
+            <OpenInAdo Href="@Links.RepositoryPolicies(Project, repo.Id)">Repository policies</OpenInAdo>
+            <OpenInAdo Href="@Links.ProjectRepositorySettings(Project)">Project-wide policies</OpenInAdo>
+        </div>
+    </div>
+
+    <h2>Scorecard</h2>
+    <div class="stats">
+        <div class="stat"><div class="value" style="color:var(--fail)">@row.Failures</div><div class="label">failing</div></div>
+        <div class="stat"><div class="value" style="color:var(--warn)">@row.Warnings</div><div class="label">warnings</div></div>
+        <div class="stat"><div class="value" style="color:var(--pass)">@row.Cells.Count(c => c.Status == RuleStatus.Pass)</div><div class="label">passing</div></div>
+    </div>
+    <table class="grid">
+        <thead><tr><th>Rule</th><th>Applies to</th><th>Severity</th><th>Result</th><th>Why</th><th></th></tr></thead>
+        <tbody>
+            @for (var i = 0; i < d.Report.Columns.Count; i++)
+            {
+                var column = d.Report.Columns[i];
+                var cell = row.Cells[i];
+                <tr>
+                    <td title="@column.Description"><strong>@column.Title</strong></td>
+                    <td class="nowrap">@(column.Branch is null ? "repository" : BranchTarget.For(column.Branch, repo).DisplayName(repo))</td>
+                    <td><span class="sev sev-@column.Severity">@column.Severity</span></td>
+                    <td><span class="status-chip status-@cell.Status">@StatusSymbol.For(cell.Status) @StatusSymbol.Text(cell.Status)</span></td>
+                    <td>@cell.Reason</td>
+                    <td class="nowrap">
+                        @if (cell.Status is RuleStatus.Fail or RuleStatus.Warn && FixUrl(column, repo) is { } fix)
+                        {
+                            <OpenInAdo Href="@fix">Fix in ADO</OpenInAdo>
+                        }
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+    @foreach (var problem in d.Report.Problems)
+    {
+        <p class="subtle small">@problem</p>
+    }
+
+    @foreach (var branch in d.Branches)
+    {
+        var name = branch.Target.DisplayName(repo);
+        <h2>Branch policies: <span class="mono">@name</span></h2>
+        @if (branch.Target.NotApplicableReason is { } reason)
+        {
+            <p class="subtle">@reason</p>
+        }
+        else if (branch.Policies.Count == 0)
+        {
+            <p><span class="status-chip status-Fail">No policies</span> Nothing protects this branch: anyone with push rights can push to it directly.</p>
+        }
+        else
+        {
+            var fromProject = branch.Policies.Count(p => p.Source == PolicySource.Project);
+            <p class="subtle small">
+                @branch.Policies.Count @(branch.Policies.Count == 1 ? "policy applies" : "policies apply"):
+                @fromProject from project-wide settings, @(branch.Policies.Count - fromProject) set on this repo.
+                @if (fromProject > 0 && fromProject < branch.Policies.Count) { <text>A gap may be quicker to fix once at project level than repo by repo.</text> }
+            </p>
+            <PolicyCards Policies="@branch.Policies" PipelineNames="@d.PipelineNames" />
+        }
+    }
+
+    <h2>Repository policies</h2>
+    @if (d.RepositoryPolicies.Count == 0)
+    {
+        <p class="subtle">No repository-level policies (file size, path length, reserved names, author email and so on).</p>
+    }
+    else
+    {
+        <PolicyCards Policies="@d.RepositoryPolicies" PipelineNames="@d.PipelineNames" />
+    }
+}
+
+@code {
+    [Parameter] public string Project { get; set; } = "";
+    [Parameter] public Guid RepositoryId { get; set; }
+
+    private RepoPolicyDetail? _detail;
+    private string? _baselineError;
+    private Exception? _error;
+    private bool _loading;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _loading = true;
+        _error = null;
+        _detail = null;
+        try
+        {
+            var load = Compliance.LoadBaseline();
+            _baselineError = load.Error;
+            // The policy view is still useful without a valid baseline, so fall back to an empty one.
+            var baseline = load.Baseline ?? new ComplianceBaseline("none", [BranchTarget.DefaultLabel], [], []);
+            _detail = await Compliance.GetRepoDetailAsync(baseline, Project, RepositoryId);
+            if (_detail is null) _error = new AdoApiException($"Repository {RepositoryId} wasn't found in {Project}.");
+        }
+        catch (Exception ex) when (ex is AdoApiException or ReadOnlyViolationException)
+        {
+            _error = ex;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private string? FixUrl(ComplianceColumn column, Repository repo)
+    {
+        if (column.Branch is null) return Links.RepositoryPolicies(Project, repo.Id);
+        var target = BranchTarget.For(column.Branch, repo);
+        return target.RefName is { } refName && !target.IsPattern ? Links.BranchPolicies(Project, repo.Id, refName) : Links.ProjectRepositorySettings(Project);
+    }
+}

@@ -1,0 +1,27 @@
+{
+  // The policies every repository should have. Edit to match your standards, then press Refresh in the app.
+  // Rule ids: MinReviewers, NoSelfApproval, ResetVotesOnPush, BuildValidationBlocking, CommentResolution,
+  //           LinkedWorkItems, AllowedMergeTypes, PoliciesAreBlocking, DefaultBranchIsMain, MaxFileSize.
+  // Severity: High, Medium or Low.
+  "version": "2026-10 draft",
+
+  // Branches to check. "default" means each repo's default branch; "release/*" checks that a prefix policy covers every release branch.
+  "branches": [ "default" ],
+
+  "rules": [
+    { "id": "MinReviewers", "severity": "High", "min": 2 },
+    { "id": "NoSelfApproval", "severity": "High" },
+    { "id": "BuildValidationBlocking", "severity": "High" },
+    { "id": "PoliciesAreBlocking", "severity": "High" },
+    { "id": "ResetVotesOnPush", "severity": "Medium" },
+    { "id": "CommentResolution", "severity": "Medium" },
+    { "id": "LinkedWorkItems", "severity": "Low" },
+    { "id": "AllowedMergeTypes", "severity": "Low", "allowed": [ "squash" ] },
+    { "id": "DefaultBranchIsMain", "severity": "Low", "name": "main" }
+  ],
+
+  // Repos that are allowed to miss some rules. "repo" is Project/Repo and may use * wildcards.
+  "exemptions": [
+    // { "repo": "Platform/sandbox-*", "rules": [ "*" ], "reason": "Personal playgrounds", "until": "2027-01-01" }
+  ]
+}

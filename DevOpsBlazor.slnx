@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DevOpsBlazor.AzureDevOps/DevOpsBlazor.AzureDevOps.csproj" />
+    <Project Path="src/DevOpsBlazor.Core/DevOpsBlazor.Core.csproj" />
+    <Project Path="src/DevOpsBlazor.Web/DevOpsBlazor.Web.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DevOpsBlazor.AzureDevOps.Tests/DevOpsBlazor.AzureDevOps.Tests.csproj" />
+    <Project Path="tests/DevOpsBlazor.Core.Tests/DevOpsBlazor.Core.Tests.csproj" />
+    <Project Path="tests/DevOpsBlazor.Web.Tests/DevOpsBlazor.Web.Tests.csproj" />
+  </Folder>
+</Solution>

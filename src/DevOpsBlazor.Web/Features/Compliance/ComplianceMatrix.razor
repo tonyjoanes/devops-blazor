@@ -1,0 +1,258 @@
+@page "/compliance"
+@inject ComplianceService Compliance
+@inject AdoLinks Links
+@inject NavigationManager Navigation
+
+<PageTitle>Compliance · DevOps Blazor</PageTitle>
+
+<div class="page-header">
+    <div>
+        <h1>Repo policy compliance</h1>
+        <div class="subtle">Each repository's branch and repository policies checked against your baseline. Hover a cell for the reason; click it for the repo's policies.</div>
+    </div>
+    @if (_report is not null)
+    {
+        <div class="links">
+            <a href="@AppRoutes.ComplianceExport("csv", ProjectParam)" target="_blank">Export CSV ↓</a>
+            <a href="@AppRoutes.ComplianceExport("md", ProjectParam)" target="_blank">Export Markdown report ↓</a>
+        </div>
+    }
+</div>
+
+<div class="toolbar">
+    <ProjectPicker Value="@Project" ValueChanged="OnProjectChanged" OnError="e => _error = e" />
+    <FluentSelect TOption="string" Label="Severity" Items="@SeverityOptions" @bind-Value="_severity" Width="140px" />
+    <FluentSelect TOption="string" Label="Show" Items="@ShowOptions" @bind-Value="_show" Width="200px" />
+    <FluentSelect TOption="string" Label="Sort" Items="@SortOptions" @bind-Value="_sort" Width="170px" />
+    <FluentSearch @bind-Value="_filter" @bind-Value:after="StateHasChanged" Immediate="true" Placeholder="Filter repositories" Width="220px" />
+    <FluentCheckbox @bind-Value="_hideDisabled" Label="Hide disabled repos" />
+</div>
+
+@if (_baseline?.Error is { } baselineError)
+{
+    <FluentMessageBar Intent="MessageIntent.Error" AllowDismiss="false" Title="Baseline problem">@baselineError</FluentMessageBar>
+}
+<ErrorPanel Error="_error" />
+
+@if (_loading)
+{
+    <Loading Text="Reading repositories and policies…" />
+}
+else if (_report is not null)
+{
+    @foreach (var problem in _report.Problems)
+    {
+        <FluentMessageBar Intent="MessageIntent.Warning" AllowDismiss="false">@problem</FluentMessageBar>
+    }
+
+    var active = _report.ActiveRows;
+    var full = active.Count(r => r.IsFullyCompliant);
+    var warnOnly = active.Count(r => r.Failures == 0 && r.Warnings > 0);
+    var failing = active.Count(r => r.Failures > 0);
+
+    <div class="stats">
+        <div class="stat"><div class="value">@active.Count</div><div class="label">repositories checked</div></div>
+        <div class="stat"><div class="value" style="color:var(--pass)">@DisplayFormat.Percent(active.Count == 0 ? null : full / (double)active.Count)</div><div class="label">fully compliant (@full)</div></div>
+        <div class="stat"><div class="value" style="color:var(--warn)">@warnOnly</div><div class="label">warnings only</div></div>
+        <div class="stat"><div class="value" style="color:var(--fail)">@failing</div><div class="label">failing at least one rule</div></div>
+        <div class="stat"><div class="value small">@_report.BaselineVersion</div><div class="label" title="@_baseline?.Path">baseline · @string.Join(", ", _report.Branches)</div></div>
+    </div>
+
+    <div class="policy-cards" style="grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); margin-bottom: 1rem">
+        <div class="card">
+            <h3 style="margin-top:0">Most broken rules</h3>
+            <div class="bars">
+                @foreach (var (column, index) in ColumnsByFailures())
+                {
+                    var fails = _report.FailuresIn(index);
+                    var warns = _report.WarningsIn(index);
+                    <span class="small">@column.Title <span class="subtle">@(column.Branch ?? "repo")</span> <span class="sev sev-@column.Severity">@column.Severity.ToString()[0]</span></span>
+                    <span class="bar" title="@fails failing, @warns warnings out of @active.Count">
+                        <span class="fill-fail" style="width:@Pct(fails, active.Count)"></span>
+                        <span class="fill-warn" style="width:@Pct(warns, active.Count)"></span>
+                    </span>
+                    <span class="small num">@fails</span>
+                }
+            </div>
+        </div>
+        @if (ByProject().Count > 1)
+        {
+            <div class="card">
+                <h3 style="margin-top:0">By project</h3>
+                <table class="grid">
+                    <thead><tr><th>Project</th><th class="num">Repos</th><th class="num">Fully compliant</th><th class="num">Failing</th></tr></thead>
+                    <tbody>
+                        @foreach (var p in ByProject())
+                        {
+                            <tr>
+                                <td><a href="@AppRoutes.Compliance(p.Project)">@p.Project</a></td>
+                                <td class="num">@p.Repos</td>
+                                <td class="num">@DisplayFormat.Percent(p.Repos == 0 ? null : p.Full / (double)p.Repos)</td>
+                                <td class="num">@p.Failing</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>
+
+    <div class="legend" style="margin-bottom:.5rem">
+        <span><span class="status-chip status-Pass">✓</span> pass</span>
+        <span><span class="status-chip status-Warn">!</span> warning</span>
+        <span><span class="status-chip status-Fail">✗</span> fail</span>
+        <span><span class="status-chip status-Exempt">E</span> exempt</span>
+        <span><span class="status-chip status-NotApplicable">–</span> not applicable</span>
+        <span class="subtle">Severity: <span class="sev sev-High">H</span> high <span class="sev sev-Medium">M</span> medium <span class="sev sev-Low">L</span> low</span>
+    </div>
+
+    var columns = VisibleColumns().ToList();
+    var rows = VisibleRows(columns).ToList();
+    @if (rows.Count == 0)
+    {
+        <p class="subtle">No repositories match.</p>
+    }
+    else
+    {
+        <div class="matrix-wrap">
+            <table class="matrix">
+                <thead>
+                    <tr>
+                        <th class="repo" rowspan="2">Repository (@rows.Count)</th>
+                        <th rowspan="2" class="num">Fails</th>
+                        @foreach (var group in columns.GroupBy(c => c.Column.Group))
+                        {
+                            <th class="group" colspan="@group.Count()">@group.Key</th>
+                        }
+                    </tr>
+                    <tr>
+                        @foreach (var (column, index, first) in WithGroupStarts(columns))
+                        {
+                            <th class="rule @(first ? "first-in-group" : "")" title="@column.Description">
+                                <span class="sev sev-@column.Severity">@column.Severity.ToString()[0]</span> @column.Title
+                            </th>
+                        }
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in rows)
+                    {
+                        var repoUrl = AppRoutes.RepoPolicies(row.Repository.Project, row.Repository.Id);
+                        <tr>
+                            <td class="repo">
+                                <a href="@repoUrl">@row.Repository.Name</a>
+                                <div class="subtle small">
+                                    @row.Repository.Project@(row.Repository.DefaultBranch is { } b ? " · " + BranchNames.Short(b) : "")@(row.Repository.IsDisabled ? " · disabled" : "")
+                                </div>
+                            </td>
+                            <td class="num">@(row.Failures > 0 ? row.Failures : "")</td>
+                            @foreach (var (column, index, first) in WithGroupStarts(columns))
+                            {
+                                var cell = row.Cells[index];
+                                <td class="cell status-@cell.Status @(first ? "first-in-group" : "")" title="@($"{column.Title} ({column.Group}): {StatusSymbol.Text(cell.Status)}. {cell.Reason}")">
+                                    <a href="@repoUrl" class="status-@cell.Status">@StatusSymbol.For(cell.Status)</a>
+                                </td>
+                            }
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        <p class="subtle small">Baseline: <span class="mono">@_baseline?.Path</span>. Edit it, then press Refresh. Policies are managed in Azure DevOps under each project's <em>Repositories</em> settings.</p>
+    }
+}
+
+@code {
+    [SupplyParameterFromQuery] public string? Project { get; set; }
+
+    private static readonly string[] SeverityOptions = ["All", "High", "Medium", "Low"];
+    private static readonly string[] ShowOptions = ["All repositories", "Failing only", "Failing or warnings"];
+    private static readonly string[] SortOptions = ["Most failures", "Name"];
+
+    private BaselineLoad? _baseline;
+    private ComplianceReport? _report;
+    private Exception? _error;
+    private bool _loading;
+    private string? _severity = "All";
+    private string? _show = "All repositories";
+    private string? _sort = "Most failures";
+    private string? _filter;
+    private bool _hideDisabled = true;
+
+    private string? ProjectParam => Project is null or ProjectScope.AllProjects ? null : Project;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _loading = true;
+        _error = null;
+        _report = null;
+        try
+        {
+            _baseline = Compliance.LoadBaseline();
+            if (_baseline.Baseline is { } baseline) _report = await Compliance.EvaluateAsync(baseline, ProjectParam);
+        }
+        catch (Exception ex) when (ex is AdoApiException or ReadOnlyViolationException)
+        {
+            _error = ex;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private IEnumerable<(ComplianceColumn Column, int Index)> VisibleColumns() =>
+        _report!.Columns.Select((c, i) => (c, i))
+            .Where(x => _severity is null or "All" || x.c.Severity.ToString() == _severity);
+
+    private IEnumerable<RepoCompliance> VisibleRows(List<(ComplianceColumn Column, int Index)> columns)
+    {
+        var rows = _report!.Rows.Where(r =>
+            (!_hideDisabled || !r.Repository.IsDisabled)
+            && (string.IsNullOrWhiteSpace(_filter) || r.Repository.FullName.Contains(_filter, StringComparison.OrdinalIgnoreCase)));
+
+        int Fails(RepoCompliance r) => columns.Count(c => r.Cells[c.Index].Status == RuleStatus.Fail);
+        int Warns(RepoCompliance r) => columns.Count(c => r.Cells[c.Index].Status == RuleStatus.Warn);
+
+        rows = _show switch
+        {
+            "Failing only" => rows.Where(r => Fails(r) > 0),
+            "Failing or warnings" => rows.Where(r => Fails(r) + Warns(r) > 0),
+            _ => rows,
+        };
+        return _sort == "Name"
+            ? rows.OrderBy(r => r.Repository.FullName, StringComparer.OrdinalIgnoreCase)
+            : rows.OrderByDescending(Fails).ThenByDescending(Warns).ThenBy(r => r.Repository.FullName, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static IEnumerable<(ComplianceColumn Column, int Index, bool First)> WithGroupStarts(List<(ComplianceColumn Column, int Index)> columns)
+    {
+        string? previous = null;
+        foreach (var (column, index) in columns)
+        {
+            yield return (column, index, column.Group != previous);
+            previous = column.Group;
+        }
+    }
+
+    private IEnumerable<(ComplianceColumn Column, int Index)> ColumnsByFailures() =>
+        _report!.Columns.Select((c, i) => (c, i))
+            .OrderByDescending(x => _report.FailuresIn(x.i))
+            .ThenByDescending(x => _report.WarningsIn(x.i))
+            .Take(10);
+
+    private sealed record ProjectSummary(string Project, int Repos, int Full, int Failing);
+
+    private List<ProjectSummary> ByProject() =>
+        _report!.ActiveRows
+            .GroupBy(r => r.Repository.Project)
+            .Select(g => new ProjectSummary(g.Key, g.Count(), g.Count(r => r.IsFullyCompliant), g.Count(r => r.Failures > 0)))
+            .OrderBy(p => p.Project)
+            .ToList();
+
+    private static string Pct(int part, int total) =>
+        total == 0 ? "0%" : (part * 100.0 / total).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + "%";
+
+    private void OnProjectChanged(string project) =>
+        Navigation.NavigateTo(AppRoutes.Compliance(project == ProjectScope.AllProjects ? null : project));
+}

@@ -1,0 +1,31 @@
+@inject ProjectScope Scope
+
+<FluentSelect TOption="Option" Label="Project" Items="@_options" OptionText="@(o => o.Text)" OptionValue="@(o => o.Value)"
+              Value="@(Value ?? ProjectScope.AllProjects)" ValueChanged="OnChanged" Width="240px" Disabled="@(_options.Count == 0)" />
+
+@code {
+    /// <summary>The selected project name, or "*" for every project in scope.</summary>
+    [Parameter] public string? Value { get; set; }
+    [Parameter] public EventCallback<string> ValueChanged { get; set; }
+
+    /// <summary>Raised if the project list can't be loaded, so the page can show why.</summary>
+    [Parameter] public EventCallback<Exception> OnError { get; set; }
+
+    private sealed record Option(string Value, string Text);
+    private List<Option> _options = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            var names = await Scope.GetProjectNamesAsync();
+            _options = [new Option(ProjectScope.AllProjects, $"All projects ({names.Count})"), .. names.Select(n => new Option(n, n))];
+        }
+        catch (AdoApiException ex)
+        {
+            await OnError.InvokeAsync(ex);
+        }
+    }
+
+    private Task OnChanged(string? value) => ValueChanged.InvokeAsync(value ?? ProjectScope.AllProjects);
+}
